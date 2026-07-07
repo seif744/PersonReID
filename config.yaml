@@ -40,7 +40,12 @@ reid:
 # Service (Stage 7), which is designed but not yet built.
 store:
   enabled: true
-  path: qdrant_data          # persistent local Qdrant folder (project root)
+  path: qdrant_data          # persistent LOCAL Qdrant folder (dev / single process)
+  # For PRODUCTION, point at a Qdrant SERVER instead of the local folder. Set the
+  # url here (non-secret) OR via the QDRANT_URL env var; when a url is present it
+  # overrides `path`. The API key is a SECRET -- read only from the QDRANT_API_KEY
+  # env var (see .env), never from this committed file.
+  url:                       # e.g. https://xxxx.<region>.aws.cloud.qdrant.io:6333
 
 # Identity Service (Stage 7): turns stored embeddings into stable global ids.
 # It is the ONLY component that assigns identity (the model + store never do).

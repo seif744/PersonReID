@@ -50,18 +50,32 @@ DEFAULT_COLLECTION = "persons"
 
 class PersonVectorStore:
     def __init__(self, path: str = "qdrant_data", *,
+                 url: Optional[str] = None,
+                 api_key: Optional[str] = None,
                  client: Optional[QdrantClient] = None,
                  collection: str = DEFAULT_COLLECTION,
                  dim: int = EMBEDDING_DIM):
         """
         path       : folder for persistent local storage. Use ":memory:" for a
                      throwaway in-process store (tests).
-        client     : pass your own QdrantClient (e.g. pointed at a server) to
-                     override `path`. This is the deployment path.
+        url        : Qdrant SERVER url (e.g. Qdrant Cloud). When set, connects to
+                     the server and `path` is ignored -- this is the deployment
+                     path (concurrent writers, backups, HA).
+        api_key    : auth token for the server. NEVER hardcode this -- pass it in
+                     from the environment (see main.py / .env).
+        client     : pass your own fully-configured QdrantClient to override both
+                     `url` and `path`.
         collection : the collection ("table") name.
         dim        : embedding size; guards every insert/search.
+
+        Precedence: client > url > path. Exactly one backend is chosen.
         """
-        self.client = client or QdrantClient(path=path)
+        if client is not None:
+            self.client = client
+        elif url:
+            self.client = QdrantClient(url=url, api_key=api_key)
+        else:
+            self.client = QdrantClient(path=path)
         self.collection = collection
         self.dim = dim
         self._ensure_collection()

@@ -38,6 +38,25 @@ from drawing import draw_detections, draw_hud
 from crop_saver import CropSaver
 
 
+def load_dotenv(path=".env"):
+    """
+    Minimal .env loader (no python-dotenv dependency). Reads KEY=VALUE lines from
+    an untracked .env file into os.environ WITHOUT overriding vars already set in
+    the real environment (so prod env vars win over a stray local .env). Secrets
+    like QDRANT_API_KEY live here; the file is gitignored.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+
 def load_config(path="config.yaml"):
     """Read config.yaml into a plain Python dictionary."""
     with open(path, "r") as f:
@@ -248,6 +267,7 @@ def run_display(names, cfg, shared, stop_event, total_videos):
 
 def main():
     # ---- Load settings ------------------------------------------------------
+    load_dotenv()          # pull secrets (QDRANT_API_KEY, ...) from untracked .env
     cfg = load_config()
     det_cfg = cfg["detector"]
     trk_cfg = cfg["tracker"]
@@ -321,9 +341,18 @@ def main():
     store_cfg = cfg.get("store", {})
     if store_cfg.get("enabled"):
         from database.store import PersonVectorStore
-        store = PersonVectorStore(path=store_cfg.get("path", "qdrant_data"))
-        print(f"[main] Vector store ready at '{store_cfg.get('path')}' "
-              f"(existing points: {store.count()}).")
+        # URL: env var wins over config.yaml. API key: env only (never committed).
+        url = os.environ.get("QDRANT_URL") or store_cfg.get("url")
+        api_key = os.environ.get("QDRANT_API_KEY")
+        if url:
+            store = PersonVectorStore(url=url, api_key=api_key)
+            print(f"[main] Vector store ready on SERVER {url} "
+                  f"(existing points: {store.count()}).")
+        else:
+            path = store_cfg.get("path", "qdrant_data")
+            store = PersonVectorStore(path=path)
+            print(f"[main] Vector store ready at LOCAL '{path}' "
+                  f"(existing points: {store.count()}).")
 
     # The Identity Service needs the store as its gallery. It is SHARED across
     # cameras (global ids are only "global" if every camera decides from the same
