@@ -1,6 +1,6 @@
 # Identity Service — Design (Stage 7)
 
-> **Status: DESIGN ONLY. Do not implement yet.**
+
 > This document specifies *what* the Identity Service is responsible for and
 > *why* the responsibility lines are drawn where they are. It is written to be
 > read by an engineer who will implement it later, and to stop identity logic

@@ -23,9 +23,9 @@ Camera(N) --RTSP--> Frame --YOLO--> bbox + classid --> Track ID --> Draw
 | 1-2 | RTSP/file -> frames (OpenCV) | built |
 | 3 | Person detection -> bbox + classid (YOLO) | built |
 | 5 | Draw boxes + labels | built |
-| 4 | Track IDs (per-camera) | next |
-| 6 | Appearance embeddings | later |
-| 7 | Cross-camera matching | later |
+| 4 | Track IDs (per-camera) | built |
+| 6 | Appearance embeddings | built |
+| 7 | Cross-camera matching | built |
 | 8 | Clustering -> global identity | later |
 
 ## What's built right now (stages 1 -> 3)

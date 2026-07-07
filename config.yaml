@@ -10,7 +10,7 @@ source:
     - name: cam_224
       path: vlc-record-2026-07-01-17h27m21s-rtsp___192.168.0.224_554_ch01_0-.avi
   # 0 = process the whole video. Set e.g. 60 for a quick CPU smoke test.
-  max_frames: 0
+  max_frames: 60
 
 detector:
   model: yolo11n.pt          # small YOLO; auto-downloaded on first run

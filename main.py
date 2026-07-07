@@ -23,6 +23,7 @@ you watch all cameras live, with the tracking boxes, safely.
 
 import argparse
 import os
+import shutil
 import sys
 import threading
 import yaml   # reads our config.yaml (installed alongside ultralytics)
@@ -98,6 +99,21 @@ def normalize_sources(videos):
             name = os.path.splitext(os.path.basename(path))[0]
         result.append((name, path))
     return result
+
+
+def clear_directory(path):
+    """Remove all contents of a directory, creating it if needed."""
+    if not path:
+        return
+    if os.path.exists(path):
+        for entry in os.listdir(path):
+            full_path = os.path.join(path, entry)
+            if os.path.isdir(full_path) and not os.path.islink(full_path):
+                shutil.rmtree(full_path)
+            else:
+                os.remove(full_path)
+    else:
+        os.makedirs(path, exist_ok=True)
 
 
 # =============================================================================
@@ -293,6 +309,10 @@ def main():
 
     print(f"[main] Preparing {len(sources)} video(s): "
           f"{', '.join(n for n, _ in sources)}")
+
+    if crop_cfg.get("save"):
+        clear_directory(crop_cfg.get("dir", "crops"))
+        print(f"[main] Cleared crops directory: {crop_cfg.get('dir', 'crops')}")
 
     # ---- Build one detector + crop saver PER video --------------------------
     # Each detector has its OWN tracker memory (IDs never bleed between videos).
