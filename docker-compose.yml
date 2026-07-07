@@ -1,0 +1,22 @@
+# Local Qdrant vector-store server for the ReID pipeline.
+#
+#   docker compose up -d        # start (detached)
+#   docker compose down         # stop  (data kept in ./qdrant_storage)
+#   docker compose logs -f      # follow logs
+#
+# REST API + web dashboard:  http://localhost:6333/dashboard
+# gRPC (optional, faster):   localhost:6334
+#
+# Data persists in the bind-mounted ./qdrant_storage folder (gitignored), so it
+# survives container restarts. This replaces both the free-cloud dim limit and
+# the single-process lock of the embedded `path: qdrant_data` mode.
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST + dashboard (what QdrantClient(url=...) uses)
+      - "6334:6334"   # gRPC (only if you set prefer_grpc=True)
+    volumes:
+      - ./qdrant_storage:/qdrant/storage

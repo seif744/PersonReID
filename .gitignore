@@ -21,3 +21,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+qdrant_storage/
+randperson_subset.tar.gz
+randperson_subset/
+prepared/randperson/

@@ -33,22 +33,36 @@ track has left) are evicted. This keeps memory flat over days/weeks of uptime.
 ============================================================================
 """
 
+import cv2
 import numpy as np
 
 from detector import crop_person   # shared "box -> safe crop" primitive
 
 
 class TrackEmbedder:
-    def __init__(self, extractor, interval=10, ttl=300):
+    def __init__(self, extractor, interval=10, ttl=300, quality=None):
         """
         extractor : a ReIDExtractor (loaded once, reused).
         interval  : recompute a track's embedding every N frames (>=1).
         ttl       : evict a track from the cache after it's been unseen for this
                     many frames.
+        quality   : optional crop-quality gate config. Bad crops are not
+                    embedded or persisted, which keeps the gallery cleaner.
         """
         self.extractor = extractor
         self.interval = max(1, interval)
         self.ttl = ttl
+        quality = quality or {}
+        self.quality_enabled = quality.get("enabled", False)
+        self.min_crop_width = quality.get("min_width", 24)
+        self.min_crop_height = quality.get("min_height", 64)
+        self.min_crop_area = quality.get("min_area", 2500)
+        self.min_box_area_ratio = quality.get("min_box_area_ratio", 0.002)
+        self.min_blur = quality.get("min_blur", 20.0)
+        self.min_brightness = quality.get("min_brightness", 20.0)
+        self.max_brightness = quality.get("max_brightness", 235.0)
+        self.min_aspect = quality.get("min_aspect", 0.20)
+        self.max_aspect = quality.get("max_aspect", 1.20)
 
         # track_id -> {"embedding": (512,) np.ndarray, "frame": int last computed}
         self._cache = {}
@@ -64,6 +78,9 @@ class TrackEmbedder:
         # the vector store -- so we store at the throttle rate, not every frame.
         self.last_embedded = []
 
+        # Quality-gate monitoring for the last process() call.
+        self.last_quality_rejected = []
+
     def process(self, frame, detections, frame_index):
         """
         Attach det.embedding for every tracked detection in `detections`, in
@@ -74,6 +91,7 @@ class TrackEmbedder:
         and nothing to attach embeddings to across frames.
         """
         due = []   # (detection, crop) pairs that need a fresh forward pass
+        rejected = []
 
         for det in detections:
             if det.track_id is None:
@@ -93,6 +111,13 @@ class TrackEmbedder:
                 if entry is not None:
                     det.embedding = entry["embedding"]
                 continue
+            quality = self._crop_quality(crop, frame.shape)
+            det.crop_quality = quality
+            if not quality["accepted"]:
+                rejected.append(det)
+                if entry is not None:
+                    det.embedding = entry["embedding"]
+                continue
             due.append((det, crop))
 
         # One batched forward pass for every track due this frame.
@@ -103,9 +128,51 @@ class TrackEmbedder:
                 self._cache[det.track_id] = {"embedding": emb, "frame": frame_index}
         self.last_num_embedded = len(due)
         self.last_embedded = [det for det, _ in due]
+        self.last_quality_rejected = rejected
 
         self._evict_stale(frame_index)
         return detections
+
+    def _crop_quality(self, crop, frame_shape):
+        """Return quality metrics plus an accepted/reason decision."""
+        h, w = crop.shape[:2]
+        area = h * w
+        frame_h, frame_w = frame_shape[:2]
+        frame_area = max(1, frame_h * frame_w)
+        aspect = w / max(1, h)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        blur = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        brightness = float(gray.mean())
+
+        metrics = {
+            "accepted": True,
+            "reason": "ok",
+            "width": w,
+            "height": h,
+            "area": area,
+            "box_area_ratio": area / frame_area,
+            "aspect": aspect,
+            "blur": blur,
+            "brightness": brightness,
+        }
+        if not self.quality_enabled:
+            return metrics
+
+        checks = [
+            (w >= self.min_crop_width, "too_narrow"),
+            (h >= self.min_crop_height, "too_short"),
+            (area >= self.min_crop_area, "too_small"),
+            (metrics["box_area_ratio"] >= self.min_box_area_ratio, "too_tiny_in_frame"),
+            (self.min_aspect <= aspect <= self.max_aspect, "bad_aspect"),
+            (blur >= self.min_blur, "blurry"),
+            (self.min_brightness <= brightness <= self.max_brightness, "bad_brightness"),
+        ]
+        for ok, reason in checks:
+            if not ok:
+                metrics["accepted"] = False
+                metrics["reason"] = reason
+                break
+        return metrics
 
     def _evict_stale(self, frame_index):
         """Drop tracks not refreshed within `ttl` frames (they've left view)."""

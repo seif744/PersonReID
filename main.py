@@ -441,7 +441,8 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                             for d in fresh:
                                 d.global_id = identity.assign(
                                     name, d.track_id, d.embedding, frame_index,
-                                    run_id=run_id)
+                                    run_id=run_id,
+                                    crop_quality=d.crop_quality)
                         stored_here += len(fresh)
                     elif store is not None and fresh:
                         # Identity off: just persist the raw observations.
@@ -451,6 +452,7 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                                 "track_id": d.track_id,
                                 "frame": frame_index,
                                 "run_id": run_id,
+                                "crop_quality": d.crop_quality,
                             }
                             for d in fresh
                         ]
@@ -643,6 +645,7 @@ def main():
                 extractor,
                 interval=reid_cfg.get("interval", 10),
                 ttl=reid_cfg.get("ttl", 300),
+                quality=reid_cfg.get("quality"),
             )
         print("[main] ReID enabled -> embedding tracked people (no ids assigned).")
 
@@ -650,17 +653,11 @@ def main():
     if store_cfg.get("enabled"):
         from database.store import PersonVectorStore
         # URL: env var wins over config.yaml. API key: env only (never committed).
-        url = os.environ.get("QDRANT_URL") or store_cfg.get("url")
-        api_key = os.environ.get("QDRANT_API_KEY")
-        if url:
-            store = PersonVectorStore(url=url, api_key=api_key)
-            print(f"[main] Vector store ready on SERVER {url} "
-                  f"(existing points: {store.count()}).")
-        else:
-            path = store_cfg.get("path", "qdrant_data")
-            store = PersonVectorStore(path=path)
-            print(f"[main] Vector store ready at LOCAL '{path}' "
-                  f"(existing points: {store.count()}).")
+        
+        path = store_cfg.get("path", "qdrant_data")
+        store = PersonVectorStore(path=path)
+        print(f"[main] Vector store ready at LOCAL '{path}' "
+        f"(existing points: {store.count()}).")
 
         if args.reset:
             store.reset()
@@ -676,6 +673,8 @@ def main():
             store,
             threshold=id_cfg.get("threshold", 0.85),
             top_k=id_cfg.get("top_k", 10),
+            bank_size=id_cfg.get("bank_size", 20),
+            min_score_gap=id_cfg.get("min_score_gap", 0.03),
         )
         print("[main] Identity Service enabled -> assigning GLOBAL ids.")
 

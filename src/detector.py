@@ -66,6 +66,11 @@ class Detection:
     # track is embedded (and, under throttling, reuses the track's last vector).
     embedding: Optional[np.ndarray] = None
 
+    # Optional metadata from the ReID crop-quality gate. It is not used by the
+    # detector itself, but keeping it on the Detection makes debugging bad crops
+    # and gallery inserts straightforward.
+    crop_quality: Optional[dict] = None
+
 
 def crop_person(frame, det, padding=0):
     """

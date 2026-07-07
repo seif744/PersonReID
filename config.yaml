@@ -38,10 +38,21 @@ reid:
   device: cpu                # "cuda" if you have a GPU
   interval: 10               # re-embed a given track at most once every N frames
   ttl: 300                   # forget a track from the cache after N unseen frames
+  quality:
+    enabled: true            # reject bad crops before embedding/storing
+    min_width: 24
+    min_height: 64
+    min_area: 2500
+    min_box_area_ratio: 0.002
+    min_blur: 20.0           # Laplacian variance; raise if blurry crops leak in
+    min_brightness: 20.0
+    max_brightness: 235.0
+    min_aspect: 0.20         # width / height
+    max_aspect: 1.20
 
 # Vector store (Qdrant). Live embeddings are written here as the video plays.
-# This stage only STORES observations; assigning global ids is the Identity
-# Service (Stage 7), which is designed but not yet built.
+# This stage stores observations; assigning global ids is handled by the
+# Identity Service below.
 store:
   enabled: true
   path: qdrant_data          # persistent LOCAL Qdrant folder (dev / single process)
@@ -55,10 +66,12 @@ store:
 # It is the ONLY component that assigns identity (the model + store never do).
 identity:
   enabled: true
-  threshold: 0.85            # cosine to accept a match. CALIBRATE per deployment
+  threshold: 0.80           # cosine to accept a match. CALIBRATE per deployment
                              # (see the sweep in src/identity/demo_identity.py).
-                             # Biased high: a MERGE is worse than a SPLIT.
-  top_k: 10                  # nearest candidates to consider before deciding
+                             # Lower values merge more; higher values split more.
+  top_k: 50                  # nearest candidates to consider before deciding
+  bank_size: 20              # recent good embeddings kept per global identity
+  min_score_gap: 0.03        # best identity must beat runner-up by this much
 
 display:
   show_window: false         # true = live OpenCV windows; false = headless

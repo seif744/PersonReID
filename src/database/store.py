@@ -50,9 +50,7 @@ DEFAULT_COLLECTION = "persons"
 
 class PersonVectorStore:
     def __init__(self, path: str = "qdrant_data", *,
-                 url: Optional[str] = None,
-                 api_key: Optional[str] = None,
-                 client: Optional[QdrantClient] = None,
+                client: Optional[QdrantClient] = None,
                  collection: str = DEFAULT_COLLECTION,
                  dim: int = EMBEDDING_DIM):
         """
@@ -72,8 +70,6 @@ class PersonVectorStore:
         """
         if client is not None:
             self.client = client
-        elif url:
-            self.client = QdrantClient(url=url, api_key=api_key)
         else:
             self.client = QdrantClient(path=path)
         self.collection = collection
