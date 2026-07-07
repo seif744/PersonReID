@@ -65,6 +65,60 @@ def load_config(path="config.yaml"):
         return yaml.safe_load(f)
 
 
+def print_run_summary(store, jobs, cfg):
+    """
+    Print WHAT the run produced, so a headless run isn't a black box. Reads the
+    ground truth back from the store (per-camera observations, distinct
+    global_ids, cross-camera people) and lists the artifacts on disk.
+    """
+    from collections import defaultdict
+
+    print("\n===== RUN SUMMARY =====")
+
+    # Per-camera crops on disk.
+    crop_dir = cfg.get("crops", {}).get("dir", "crops")
+    for name, *_ in jobs:
+        cam_dir = os.path.join(crop_dir, name)
+        if os.path.isdir(cam_dir):
+            tracks = [d for d in os.listdir(cam_dir)
+                      if os.path.isdir(os.path.join(cam_dir, d))]
+            jpgs = sum(len(os.listdir(os.path.join(cam_dir, t))) for t in tracks)
+            print(f"  {name}: {len(tracks)} tracks, {jpgs} crops -> {cam_dir}/")
+
+    # Embeddings + identities, read back from the store.
+    if store is not None:
+        try:
+            cam_obs = defaultdict(int)
+            gid_cams = defaultdict(set)
+            offset = None
+            while True:
+                pts, offset = store.client.scroll(
+                    store.collection, limit=1000, offset=offset,
+                    with_payload=True, with_vectors=False)
+                for p in pts:
+                    pl = p.payload or {}
+                    cam_obs[pl.get("camera")] += 1
+                    if pl.get("global_id") is not None:
+                        gid_cams[pl["global_id"]].add(pl.get("camera"))
+                if offset is None:
+                    break
+            total = sum(cam_obs.values())
+            cross = sum(1 for cams in gid_cams.values() if len(cams) > 1)
+            print(f"  Store: {total} observations -> "
+                  f"{len(gid_cams)} distinct people (global_ids)")
+            print(f"  Cross-camera people: {cross}")
+        except Exception as e:
+            print(f"  Store: (could not summarize: {e})")
+
+    # Annotated videos, if written.
+    if cfg.get("display", {}).get("save_annotated"):
+        vids = [f"output_{name}.mp4" for name, *_ in jobs
+                if os.path.exists(f"output_{name}.mp4")]
+        if vids:
+            print(f"  Annotated videos: {', '.join(vids)}")
+    print("=======================\n")
+
+
 def get_screen_size():
     """
     Return the monitor's (width, height) in pixels so we can fit windows on
@@ -129,6 +183,12 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity, l
     # 0 = process the whole video; a positive number stops early (handy for a
     # quick CPU test without waiting for hundreds of frames).
     max_frames = cfg["source"].get("max_frames", 0)
+    # 0 = keep native resolution. A positive width downscales every frame (keeping
+    # aspect) BEFORE detect/track/crop/embed -- QHD footage on CPU is dominated by
+    # pixel count, so e.g. 1280 is dramatically faster for dev with little ReID
+    # cost. Everything downstream uses the same resized frame, so coords stay
+    # consistent (crops are smaller too).
+    resize_width = cfg["source"].get("resize_width", 0)
 
     tag = f"[{name}]"
     writer = None
@@ -143,6 +203,14 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity, l
                 # Stop early if the user pressed 'q' in the main thread.
                 if stop_event.is_set():
                     break
+
+                # ---- Optional downscale (dev speed on CPU) -----------------
+                # Do it FIRST so every later stage sees the same smaller frame.
+                if resize_width and frame.shape[1] > resize_width:
+                    scale = resize_width / frame.shape[1]
+                    frame = cv2.resize(
+                        frame, (resize_width, int(round(frame.shape[0] * scale))),
+                        interpolation=cv2.INTER_AREA)
 
                 # ---- STAGE 3 (+4): detect, with or without track IDs --------
                 if trk_cfg["enabled"]:
@@ -439,6 +507,7 @@ def main():
         t.join(timeout=5)
 
     cv2.destroyAllWindows()
+    print_run_summary(store, jobs, cfg)
     print("[main] All done.")
 
 
