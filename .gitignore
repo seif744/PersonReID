@@ -25,3 +25,6 @@ qdrant_storage/
 randperson_subset.tar.gz
 randperson_subset/
 prepared/randperson/
+reports/
+*.avi
+models/
