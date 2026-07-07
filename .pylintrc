@@ -1,0 +1,20 @@
+# =============================================================================
+# .pylintrc  --  configuration for the Pylint code-checker.
+# -----------------------------------------------------------------------------
+# WHY THIS FILE EXISTS:
+# OpenCV (cv2) builds most of its functions from compiled C++ at runtime, so a
+# static checker can't "see" members like VideoCapture / CAP_FFMPEG and wrongly
+# reports "no member". These two settings tell Pylint that cv2 is trustworthy:
+#   - extension-pkg-allow-list lets Pylint actually import the C extension so it
+#     can discover the real members.
+#   - generated-members silences the "no-member" warning for anything on cv2.*
+# The code is correct; this only quiets the false positives.
+# =============================================================================
+
+[MAIN]
+# Allow Pylint to import & introspect these compiled packages.
+extension-pkg-allow-list=cv2
+
+[TYPECHECK]
+# Treat every cv2.<something> as a known member (no false "no-member" errors).
+generated-members=cv2.*

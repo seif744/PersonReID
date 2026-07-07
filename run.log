@@ -1,0 +1,17 @@
+[main] Preparing 2 video(s): cam_219, cam_224
+[detector] Loading model 'yolo11n.pt' (first run may download it)...
+[detector] Model ready.
+[main] cam_219: crops -> crops\cam_219/
+[detector] Loading model 'yolo11n.pt' (first run may download it)...
+[detector] Model ready.
+[main] cam_224: crops -> crops\cam_224/
+[main] Running 2 videos simultaneously (no live windows; see output_<name>.mp4 and crops/<name>/).
+[cam_219] Pipeline running on 'vlc-record-2026-07-01-17h27m20s-rtsp___192.168.0.219_554_ch01_0-.avi'.
+[cam_224] Pipeline running on 'vlc-record-2026-07-01-17h27m21s-rtsp___192.168.0.224_554_ch01_0-.avi'.
+[cam_224] Writing annotated video -> output_cam_224.mp4
+[cam_219] Writing annotated video -> output_cam_219.mp4
+[video_source] End of video file.
+[cam_224] Done. Processed 459 frames.
+[video_source] End of video file.
+[cam_219] Done. Processed 801 frames.
+[main] All done.

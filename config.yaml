@@ -1,0 +1,57 @@
+# =============================================================================
+# config.yaml -- all the knobs for the pipeline. main.py reads this at startup.
+# =============================================================================
+
+source:
+  # One entry per camera. Each gets its own detector/tracker and crops folder.
+  videos:
+    - name: cam_219
+      path: vlc-record-2026-07-01-17h27m20s-rtsp___192.168.0.219_554_ch01_0-.avi
+    - name: cam_224
+      path: vlc-record-2026-07-01-17h27m21s-rtsp___192.168.0.224_554_ch01_0-.avi
+  # 0 = process the whole video. Set e.g. 60 for a quick CPU smoke test.
+  max_frames: 0
+
+detector:
+  model: yolo11n.pt          # small YOLO; auto-downloaded on first run
+  confidence_threshold: 0.4  # drop boxes less confident than this
+  person_class_id: 0         # COCO class 0 = person
+
+tracker:
+  enabled: true
+  config: bytetrack.yaml     # ships with ultralytics; "botsort.yaml" also works
+
+crops:
+  save: true                 # write per-person crops to disk (debug + ReID data)
+  dir: crops
+  interval: 10               # save a crop for a track once every N frames
+  padding: 0
+
+reid:
+  enabled: true
+  # OSNet person-ReID weights (dev checkpoint; swap for RandPerson before ship).
+  weights: src/reid/weights/osnet_x1_0_market1501.pth
+  device: cpu                # "cuda" if you have a GPU
+  interval: 10               # re-embed a given track at most once every N frames
+  ttl: 300                   # forget a track from the cache after N unseen frames
+
+# Vector store (Qdrant). Live embeddings are written here as the video plays.
+# This stage only STORES observations; assigning global ids is the Identity
+# Service (Stage 7), which is designed but not yet built.
+store:
+  enabled: true
+  path: qdrant_data          # persistent local Qdrant folder (project root)
+
+# Identity Service (Stage 7): turns stored embeddings into stable global ids.
+# It is the ONLY component that assigns identity (the model + store never do).
+identity:
+  enabled: true
+  threshold: 0.85            # cosine to accept a match. CALIBRATE per deployment
+                             # (see the sweep in src/identity/demo_identity.py).
+                             # Biased high: a MERGE is worse than a SPLIT.
+  top_k: 10                  # nearest candidates to consider before deciding
+
+display:
+  show_window: false         # true = live OpenCV windows; false = headless
+  save_annotated: true       # write output_<name>.mp4 with boxes + ids
+  window_scale: 1.0
