@@ -126,6 +126,23 @@ class PersonVectorStore:
             with_payload=True,
         ).points
 
+    def set_global_id(self, point_ids: List[str], global_id: int) -> None:
+        """
+        Reassign the global_id payload on already-stored points, in one call.
+
+        Used by the offline reconciliation pass: when two global_ids are found to
+        be the same real person, every observation of the losing id is re-stamped
+        with the surviving id. Only the payload field changes -- vectors and point
+        ids are untouched, so the gallery stays intact.
+        """
+        if not point_ids:
+            return
+        self.client.set_payload(
+            collection_name=self.collection,
+            payload={"global_id": int(global_id)},
+            points=list(point_ids),
+        )
+
     def count(self) -> int:
         """How many points are currently stored."""
         return self.client.count(self.collection).count

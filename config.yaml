@@ -73,6 +73,32 @@ identity:
   bank_size: 20              # recent good embeddings kept per global identity
   min_score_gap: 0.03        # best identity must beat runner-up by this much
 
+  # Constraint gate (Stage 7): veto appearance matches that are physically
+  # impossible given camera topology + timing (see src/identity/constraints.py).
+  # OFF by default -- needs a real camera map. With no transitions listed and
+  # default_policy: allow, it is a no-op, so enabling it changes nothing until you
+  # describe how the cameras connect.
+  constraints:
+    enabled: false
+    fps: 20                  # frames/sec, to convert frame gaps to seconds
+    default_policy: allow    # camera pairs with no rule below: allow | reject
+    transitions: []
+      # Directional travel windows. min_seconds: 0 = overlapping fields of view
+      # (same person can appear in both at once -- our cam_219/cam_224 case).
+      # - {from: cam_219, to: cam_224, min_seconds: 0, max_seconds: 5}
+      # - {from: cam_224, to: cam_219, min_seconds: 0, max_seconds: 5}
+
+  # Offline reconciliation (Stage 7b): after ALL cameras finish, merge global ids
+  # that are the same person but were split live -- e.g. someone who entered two
+  # cameras at the same instant, which the sticky live decision cannot catch.
+  reconcile:
+    enabled: true
+    threshold:               # prototype cosine to merge; blank = use identity.threshold
+    block_same_camera_overlap: true   # never merge ids co-present in one camera (two bodies)
+    require_reciprocal_best: true      # merge a pair only if they are each other's best
+                                       # match -- stops look-alike over-merging on
+                                       # weak/out-of-domain models. See reconcile.py.
+
 display:
   show_window: false         # true = live OpenCV windows; false = headless
   save_annotated: true       # write output_<name>.mp4 with boxes + ids

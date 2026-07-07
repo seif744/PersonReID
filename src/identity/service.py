@@ -43,7 +43,8 @@ import numpy as np
 
 class IdentityService:
     def __init__(self, store, threshold: float = 0.85, top_k: int = 10,
-                 bank_size: int = 20, min_score_gap: float = 0.03):
+                 bank_size: int = 20, min_score_gap: float = 0.03,
+                 constraints=None):
         """
         store     : a PersonVectorStore used as the identity gallery.
         threshold : minimum cosine score to accept a candidate as the SAME
@@ -64,14 +65,19 @@ class IdentityService:
                     prototype scoring.
         min_score_gap : require the best identity to beat the second-best by
                         this margin, reducing ambiguous look-alike merges.
+        constraints   : an optional ConstraintGate (constraints.py) that vetoes
+                        candidates which are physically implausible given camera
+                        topology + timing. None = appearance only (v1 behavior).
         """
         self.store = store
         self.threshold = threshold
         self.top_k = top_k
         self.bank_size = max(1, int(bank_size))
         self.min_score_gap = max(0.0, float(min_score_gap))
+        self.constraints = constraints
 
         self._track_to_global = {}   # (camera, track_id) -> global_id  (sticky)
+        self._last_seen = {}         # global_id -> (camera, frame) most recent
         self._banks = defaultdict(lambda: deque(maxlen=self.bank_size))
         self._load_existing_banks()
         self._next_global_id = self._initial_next_global_id()
@@ -110,19 +116,27 @@ class IdentityService:
             if gid is None:
                 continue   # a raw observation not yet identified -- skip
             gid = int(gid)
+
+            # ---- CONSTRAINT GATE (DESIGN.md) -- WHERE + WHEN --------------------
+            # Before trusting appearance, veto candidates that are physically
+            # implausible: a person last seen in another camera can only match here
+            # if there was time to walk the path between them (topology + timing;
+            # see constraints.py). This turns "closest vector" into "closest
+            # PLAUSIBLE person" and is what stops look-alikes in different places
+            # from being fused. No gate configured -> appearance only (v1).
+            # (Motion down-weighting, the third hook, needs trajectory data not yet
+            # in this path -- documented in constraints.py, not stubbed here.)
+            if self.constraints is not None:
+                prev = self._last_seen.get(gid)
+                if prev is not None:
+                    ok, _reason = self.constraints.allows(
+                        camera, frame_index, prev[0], prev[1])
+                    if not ok:
+                        continue   # implausible here/now -- drop this candidate
+            # --------------------------------------------------------------------
+
             candidate_gids.add(gid)
             fallback_scores[gid] = max(fallback_scores[gid], float(hit.score))
-
-            # ---- CONSTRAINT HOOK (DESIGN.md) -- not yet implemented ----------
-            # Before trusting appearance, a real system would GATE this candidate:
-            #   * temporal:  reject if this global_id was seen elsewhere at a time
-            #                that makes being here now impossible.
-            #   * topology:  reject if the candidate's last camera has no path to
-            #                `camera` within the elapsed frames/time.
-            #   * motion:    down-weight if the trajectory is inconsistent.
-            # These turn "closest vector" into "closest PLAUSIBLE person". Until
-            # they exist, v1 trusts appearance alone and will err on look-alikes.
-            # ------------------------------------------------------------------
 
         scored = []
         for gid in candidate_gids:
@@ -159,6 +173,8 @@ class IdentityService:
             payload["crop_quality"] = crop_quality
         self.store.add(embedding, payload)
         self._add_to_bank(gid, embedding)
+        # Remember where/when this identity was last seen, for the constraint gate.
+        self._last_seen[int(gid)] = (camera, frame_index)
 
     def _add_to_bank(self, gid, embedding):
         emb = np.asarray(embedding, dtype=np.float32).ravel()

@@ -1,8 +1,13 @@
 Cross-camera matches
 ====================
-run_id: 20260707_170150
+run_id: 20260707_185132
 
-GID 1: cam_219, cam_224; 522 observations; frames 0-800
+GID 1: cam_219, cam_224; 58 observations; frames 0-778
 contact sheet: reports/cross_camera_matches/gid_0001.jpg
-cam_219: track 0001 frames 0-120 (13 obs) -> crops/cam_219/id_0001; track 0002 frames 0-800 (81 obs) -> crops/cam_219/id_0002; track 0003 frames 0-800 (81 obs) -> crops/cam_219/id_0003; track 0004 frames 0-30 (4 obs) -> crops/cam_219/id_0004; track 0005 frames 0-771 (73 obs) -> crops/cam_219/id_0005; track 0011 frames 30-791 (77 obs) -> crops/cam_219/id_0011; track 0021 frames 286-326 (5 obs) -> crops/cam_219/id_0021; track 0024 frames 393-778 (39 obs) -> crops/cam_219/id_0024; track 0028 frames 724-800 (6 obs) -> crops/cam_219/id_0028
-cam_224: track 0006 frames 0-451 (46 obs) -> crops/cam_224/id_0006; track 0007 frames 0-84 (9 obs) -> crops/cam_224/id_0007; track 0008 frames 0-0 (1 obs) -> crops/cam_224/id_0008; track 0010 frames 22-32 (2 obs) -> crops/cam_224/id_0010; track 0012 frames 31-457 (43 obs) -> crops/cam_224/id_0012; track 0014 frames 98-118 (3 obs) -> crops/cam_224/id_0014; track 0016 frames 158-208 (6 obs) -> crops/cam_224/id_0016; track 0018 frames 223-453 (24 obs) -> crops/cam_224/id_0018; track 0022 frames 318-318 (1 obs) -> crops/cam_224/id_0022; track 0025 frames 381-451 (8 obs) -> crops/cam_224/id_0025
+cam_219: track 0001 frames 0-120 (13 obs) -> crops/cam_219/id_0001; track 0021 frames 286-326 (5 obs) -> crops/cam_219/id_0021; track 0024 frames 393-778 (39 obs) -> crops/cam_219/id_0024
+cam_224: track 0022 frames 318-318 (1 obs) -> crops/cam_224/id_0022
+
+GID 4: cam_219, cam_224; 211 observations; frames 0-791
+contact sheet: reports/cross_camera_matches/gid_0004.jpg
+cam_219: track 0004 frames 0-30 (4 obs) -> crops/cam_219/id_0004; track 0005 frames 0-771 (73 obs) -> crops/cam_219/id_0005; track 0011 frames 30-791 (77 obs) -> crops/cam_219/id_0011
+cam_224: track 0006 frames 0-451 (46 obs) -> crops/cam_224/id_0006; track 0008 frames 0-0 (1 obs) -> crops/cam_224/id_0008; track 0010 frames 22-32 (2 obs) -> crops/cam_224/id_0010; track 0025 frames 381-451 (8 obs) -> crops/cam_224/id_0025
