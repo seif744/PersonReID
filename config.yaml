@@ -10,11 +10,11 @@ source:
     - name: cam_224
       path: vlc-record-2026-07-01-17h27m21s-rtsp___192.168.0.224_554_ch01_0-.avi
   # 0 = process the whole video. Set e.g. 60 for a quick CPU smoke test.
-  max_frames: 60
+  max_frames: 0
   # 0 = native resolution. Positive width downscales every frame (keeps aspect)
   # before detect/track/crop/embed. QHD (2560px) on CPU is very slow; 1280 is a
   # big speedup for dev with little ReID cost. Use 0 for a final full-res run.
-  resize_width: 1280
+  resize_width: 0
 
 detector:
   model: yolo11n.pt          # small YOLO; auto-downloaded on first run

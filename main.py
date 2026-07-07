@@ -22,12 +22,14 @@ you watch all cameras live, with the tracking boxes, safely.
 """
 
 import argparse
+from datetime import datetime
 import os
 import shutil
 import sys
 import threading
 import yaml   # reads our config.yaml (installed alongside ultralytics)
 import cv2
+import numpy as np
 
 # Put the `src` folder on the import path so EVERY module -- here, in reid/, and
 # in database/ -- imports the same bare way (`from detector import ...`). `src`
@@ -38,6 +40,101 @@ from video_source import VideoSource
 from detector import PersonDetector
 from drawing import draw_detections, draw_hud
 from crop_saver import CropSaver
+
+
+def _track_dir(crop_dir, camera, track_id):
+    """Return the crop folder for one camera-local track."""
+    if track_id is None:
+        return None
+    return os.path.join(crop_dir, camera, f"id_{int(track_id):04d}")
+
+
+def _sample_crop_paths(track_dir, max_images=6):
+    """Pick a small, time-spread sample from one track's saved crops."""
+    if not track_dir or not os.path.isdir(track_dir):
+        return []
+    files = sorted(
+        os.path.join(track_dir, f)
+        for f in os.listdir(track_dir)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    )
+    if len(files) <= max_images:
+        return files
+    if max_images <= 1:
+        return [files[0]]
+    indexes = np.linspace(0, len(files) - 1, max_images, dtype=int)
+    return [files[i] for i in indexes]
+
+
+def _put_label(img, text, x, y, scale=0.5, thickness=1):
+    """Draw readable black text on a light report image."""
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (20, 20, 20), thickness, cv2.LINE_AA)
+
+
+def _make_cross_camera_contact_sheet(gid, gid_info, crop_dir, report_dir,
+                                     thumbs_per_track=6):
+    """
+    Build a side-by-side visual report for one global_id that appeared in 2+
+    cameras. Rows are camera-local tracks; columns are sampled saved crops.
+    """
+    rows = []
+    for camera in sorted(gid_info["cameras"]):
+        tracks = gid_info["cameras"][camera]["tracks"]
+        for track_id in sorted((t for t in tracks if t is not None), key=int):
+            track_dir = _track_dir(crop_dir, camera, track_id)
+            paths = _sample_crop_paths(track_dir, thumbs_per_track)
+            rows.append((camera, track_id, paths, track_dir))
+
+    if not rows:
+        return None
+
+    thumb_w, thumb_h = 120, 180
+    left_w = 230
+    pad = 12
+    header_h = 48
+    row_h = thumb_h + 34
+    width = left_w + pad + thumbs_per_track * (thumb_w + pad) + pad
+    height = header_h + len(rows) * row_h + pad
+    sheet = np.full((height, width, 3), 245, dtype=np.uint8)
+
+    cams = ", ".join(sorted(gid_info["cameras"]))
+    _put_label(sheet, f"GID {gid} - seen in: {cams}", 14, 30, scale=0.75, thickness=2)
+
+    y = header_h
+    for camera, track_id, paths, track_dir in rows:
+        frames = gid_info["cameras"][camera]["tracks"][track_id]["frames"]
+        frame_text = ""
+        if frames:
+            frame_text = f" frames {min(frames)}-{max(frames)}"
+        _put_label(sheet, f"{camera}", 14, y + 28, scale=0.6, thickness=2)
+        _put_label(sheet, f"track {int(track_id):04d}{frame_text}", 14, y + 52)
+        _put_label(sheet, os.path.relpath(track_dir, os.getcwd()), 14, y + 76, scale=0.42)
+
+        x = left_w
+        for path in paths:
+            img = cv2.imread(path)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            scale = min(thumb_w / max(1, w), thumb_h / max(1, h))
+            new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            tile = np.full((thumb_h, thumb_w, 3), 230, dtype=np.uint8)
+            ox = (thumb_w - new_w) // 2
+            oy = (thumb_h - new_h) // 2
+            tile[oy:oy + new_h, ox:ox + new_w] = resized
+            sheet[y:y + thumb_h, x:x + thumb_w] = tile
+            _put_label(sheet, os.path.splitext(os.path.basename(path))[0],
+                       x, y + thumb_h + 18, scale=0.42)
+            x += thumb_w + pad
+
+        y += row_h
+
+    os.makedirs(report_dir, exist_ok=True)
+    out_path = os.path.join(report_dir, f"gid_{int(gid):04d}.jpg")
+    cv2.imwrite(out_path, sheet)
+    return out_path
 
 
 def load_dotenv(path=".env"):
@@ -65,7 +162,7 @@ def load_config(path="config.yaml"):
         return yaml.safe_load(f)
 
 
-def print_run_summary(store, jobs, cfg):
+def print_run_summary(store, jobs, cfg, run_id=None):
     """
     Print WHAT the run produced, so a headless run isn't a black box. Reads the
     ground truth back from the store (per-camera observations, distinct
@@ -74,6 +171,8 @@ def print_run_summary(store, jobs, cfg):
     from collections import defaultdict
 
     print("\n===== RUN SUMMARY =====")
+    if run_id is not None:
+        print(f"  Run id: {run_id}")
 
     # Per-camera crops on disk.
     crop_dir = cfg.get("crops", {}).get("dir", "crops")
@@ -89,7 +188,17 @@ def print_run_summary(store, jobs, cfg):
     if store is not None:
         try:
             cam_obs = defaultdict(int)
-            gid_cams = defaultdict(set)
+            gid_info = defaultdict(lambda: {
+                "observations": 0,
+                "frames": [],
+                "cameras": defaultdict(lambda: {
+                    "observations": 0,
+                    "tracks": defaultdict(lambda: {
+                        "observations": 0,
+                        "frames": [],
+                    }),
+                }),
+            })
             offset = None
             while True:
                 pts, offset = store.client.scroll(
@@ -97,16 +206,106 @@ def print_run_summary(store, jobs, cfg):
                     with_payload=True, with_vectors=False)
                 for p in pts:
                     pl = p.payload or {}
-                    cam_obs[pl.get("camera")] += 1
-                    if pl.get("global_id") is not None:
-                        gid_cams[pl["global_id"]].add(pl.get("camera"))
+                    if run_id is not None and pl.get("run_id") != run_id:
+                        continue
+                    camera = pl.get("camera")
+                    track_id = pl.get("track_id")
+                    frame = pl.get("frame")
+                    gid = pl.get("global_id")
+                    cam_obs[camera] += 1
+                    if gid is None:
+                        continue
+
+                    info = gid_info[gid]
+                    info["observations"] += 1
+                    if frame is not None:
+                        info["frames"].append(frame)
+
+                    cam_info = info["cameras"][camera]
+                    cam_info["observations"] += 1
+
+                    track_info = cam_info["tracks"][track_id]
+                    track_info["observations"] += 1
+                    if frame is not None:
+                        track_info["frames"].append(frame)
                 if offset is None:
                     break
             total = sum(cam_obs.values())
-            cross = sum(1 for cams in gid_cams.values() if len(cams) > 1)
+            cross_ids = sorted(
+                gid for gid, info in gid_info.items()
+                if len(info["cameras"]) > 1
+            )
             print(f"  Store: {total} observations -> "
-                  f"{len(gid_cams)} distinct people (global_ids)")
-            print(f"  Cross-camera people: {cross}")
+                  f"{len(gid_info)} distinct people (global_ids)")
+            print(f"  Cross-camera people: {len(cross_ids)}")
+
+            report_dir = os.path.join("reports", "cross_camera_matches")
+            clear_directory(report_dir)
+            if cross_ids:
+                summary_path = os.path.join(report_dir, "summary.txt")
+                report_lines = [
+                    "Cross-camera matches",
+                    "====================",
+                    f"run_id: {run_id}",
+                    "",
+                ]
+
+                crop_dir = cfg.get("crops", {}).get("dir", "crops")
+                print("  Cross-camera match details:")
+                for gid in cross_ids:
+                    info = gid_info[gid]
+                    cameras = sorted(info["cameras"])
+                    if info["frames"]:
+                        frame_span = f"{min(info['frames'])}-{max(info['frames'])}"
+                    else:
+                        frame_span = "unknown"
+                    sheet_path = _make_cross_camera_contact_sheet(
+                        gid, info, crop_dir, report_dir)
+                    sheet_display = sheet_path if sheet_path else "(no crops found)"
+
+                    header = (
+                        f"    GID {gid}: {', '.join(cameras)}; "
+                        f"{info['observations']} observations; frames {frame_span}"
+                    )
+                    print(header)
+                    print(f"      contact sheet: {sheet_display}")
+                    report_lines.append(header.strip())
+                    report_lines.append(f"contact sheet: {sheet_display}")
+
+                    for camera in cameras:
+                        cam_info = info["cameras"][camera]
+                        track_bits = []
+                        for track_id in sorted(cam_info["tracks"],
+                                               key=lambda v: (-1 if v is None else int(v))):
+                            track_info = cam_info["tracks"][track_id]
+                            frames = track_info["frames"]
+                            if frames:
+                                span = f"{min(frames)}-{max(frames)}"
+                            else:
+                                span = "unknown"
+                            if track_id is None:
+                                track_label = "track unknown"
+                                crop_path = "(no crop folder)"
+                            else:
+                                track_label = f"track {int(track_id):04d}"
+                                crop_path = _track_dir(crop_dir, camera, track_id)
+                            track_bits.append(
+                                f"{track_label} frames {span} "
+                                f"({track_info['observations']} obs) -> {crop_path}"
+                            )
+                        line = f"      {camera}: " + "; ".join(track_bits)
+                        print(line)
+                        report_lines.append(line.strip())
+                    report_lines.append("")
+
+                with open(summary_path, "w") as f:
+                    f.write("\n".join(report_lines))
+                print(f"  Cross-camera report: {summary_path}")
+            else:
+                summary_path = os.path.join(report_dir, "summary.txt")
+                with open(summary_path, "w") as f:
+                    f.write(f"No cross-camera matches for run_id: {run_id}\n")
+                print(f"  Cross-camera report: {summary_path}")
         except Exception as e:
             print(f"  Store: (could not summarize: {e})")
 
@@ -176,7 +375,8 @@ def clear_directory(path):
 #   - reads frames, detects+tracks, saves crops, draws boxes, and
 #   - publishes its latest annotated frame into `shared` for the main thread.
 # =============================================================================
-def process_video(name, path, detector, crop_saver, embedder, store, identity, locks, cfg, shared, stop_event):
+def process_video(name, path, detector, crop_saver, embedder, store, identity,
+                  locks, cfg, shared, stop_event, run_id):
     disp_cfg = cfg["display"]
     trk_cfg = cfg["tracker"]
     save_annotated = disp_cfg.get("save_annotated", False)
@@ -240,12 +440,18 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity, l
                         with locks["identity"]:
                             for d in fresh:
                                 d.global_id = identity.assign(
-                                    name, d.track_id, d.embedding, frame_index)
+                                    name, d.track_id, d.embedding, frame_index,
+                                    run_id=run_id)
                         stored_here += len(fresh)
                     elif store is not None and fresh:
                         # Identity off: just persist the raw observations.
                         payloads = [
-                            {"camera": name, "track_id": d.track_id, "frame": frame_index}
+                            {
+                                "camera": name,
+                                "track_id": d.track_id,
+                                "frame": frame_index,
+                                "run_id": run_id,
+                            }
                             for d in fresh
                         ]
                         with locks["store"]:
@@ -374,9 +580,11 @@ def main():
     if not sources:
         print("[main] No videos listed under source.videos in config.yaml.")
         return
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     print(f"[main] Preparing {len(sources)} video(s): "
           f"{', '.join(n for n, _ in sources)}")
+    print(f"[main] Run id: {run_id}")
 
     if crop_cfg.get("save"):
         clear_directory(crop_cfg.get("dir", "crops"))
@@ -486,7 +694,7 @@ def main():
         t = threading.Thread(
             target=process_video,
             args=(name, path, detector, crop_saver, embedders.get(name), store,
-                  identity, locks, cfg, shared, stop_event),
+                  identity, locks, cfg, shared, stop_event, run_id),
             name=name,
         )
         t.start()
@@ -507,7 +715,7 @@ def main():
         t.join(timeout=5)
 
     cv2.destroyAllWindows()
-    print_run_summary(store, jobs, cfg)
+    print_run_summary(store, jobs, cfg, run_id=run_id)
     print("[main] All done.")
 
 

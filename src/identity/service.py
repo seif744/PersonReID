@@ -61,9 +61,10 @@ class IdentityService:
         self.top_k = top_k
 
         self._track_to_global = {}   # (camera, track_id) -> global_id  (sticky)
-        self._next_global_id = 1     # monotonic id minter
+        self._next_global_id = self._initial_next_global_id()
 
-    def assign(self, camera: str, track_id: int, embedding, frame_index: int) -> int:
+    def assign(self, camera: str, track_id: int, embedding, frame_index: int,
+               run_id=None) -> int:
         """
         Return the global_id for this observation, deciding it if the track is
         new. Also commits the observation to the gallery under that global_id.
@@ -74,13 +75,13 @@ class IdentityService:
         # this fresh observation so the gallery accumulates more views of them.
         if key in self._track_to_global:
             gid = self._track_to_global[key]
-            self._commit(camera, track_id, embedding, frame_index, gid)
+            self._commit(camera, track_id, embedding, frame_index, gid, run_id)
             return gid
 
         # New track -> match against the gallery, or mint a new identity.
         gid = self._match_or_mint(camera, embedding, frame_index)
         self._track_to_global[key] = gid
-        self._commit(camera, track_id, embedding, frame_index, gid)
+        self._commit(camera, track_id, embedding, frame_index, gid, run_id)
         return gid
 
     def _match_or_mint(self, camera: str, embedding, frame_index: int) -> int:
@@ -116,11 +117,36 @@ class IdentityService:
         self._next_global_id += 1
         return gid
 
-    def _commit(self, camera, track_id, embedding, frame_index, gid):
+    def _commit(self, camera, track_id, embedding, frame_index, gid, run_id=None):
         """Store this observation under its global_id (grows the gallery)."""
-        self.store.add(embedding, {
+        payload = {
             "camera": camera,
             "track_id": track_id,
             "frame": frame_index,
             "global_id": gid,
-        })
+        }
+        if run_id is not None:
+            payload["run_id"] = run_id
+        self.store.add(embedding, payload)
+
+    def _initial_next_global_id(self):
+        """
+        Continue after existing ids when using a persistent store. Otherwise a
+        new run without --reset could mint GID 1 again for a different person.
+        """
+        max_gid = 0
+        try:
+            offset = None
+            while True:
+                pts, offset = self.store.client.scroll(
+                    self.store.collection, limit=1000, offset=offset,
+                    with_payload=True, with_vectors=False)
+                for p in pts:
+                    gid = (p.payload or {}).get("global_id")
+                    if gid is not None:
+                        max_gid = max(max_gid, int(gid))
+                if offset is None:
+                    break
+        except Exception:
+            max_gid = 0
+        return max_gid + 1
