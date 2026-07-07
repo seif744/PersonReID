@@ -21,6 +21,7 @@ thread reads that buffer and shows every camera in its own window. This lets
 you watch all cameras live, with the tracking boxes, safely.
 """
 
+import argparse
 import os
 import sys
 import threading
@@ -265,8 +266,19 @@ def run_display(names, cfg, shared, stop_event, total_videos):
         cv2.waitKey(0)
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Multi-camera person ReID pipeline.")
+    p.add_argument(
+        "--reset", action="store_true",
+        help="Wipe the vector store collection before running, so a test starts "
+             "from a clean gallery. DESTRUCTIVE -- deletes all stored embeddings.",
+    )
+    return p.parse_args()
+
+
 def main():
     # ---- Load settings ------------------------------------------------------
+    args = parse_args()
     load_dotenv()          # pull secrets (QDRANT_API_KEY, ...) from untracked .env
     cfg = load_config()
     det_cfg = cfg["detector"]
@@ -353,6 +365,10 @@ def main():
             store = PersonVectorStore(path=path)
             print(f"[main] Vector store ready at LOCAL '{path}' "
                   f"(existing points: {store.count()}).")
+
+        if args.reset:
+            store.reset()
+            print(f"[main] --reset: cleared the store (now {store.count()} points).")
 
     # The Identity Service needs the store as its gallery. It is SHARED across
     # cameras (global ids are only "global" if every camera decides from the same
