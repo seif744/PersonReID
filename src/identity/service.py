@@ -78,8 +78,11 @@ class IdentityService:
 
         self._track_to_global = {}   # (camera, track_id) -> global_id  (sticky)
         self._last_seen = {}         # global_id -> (camera, frame) most recent
+        # global_id -> camera -> list of [start_frame, end_frame] spans.
+        # Live matching uses this to reject same-camera overlap before a merge.
+        self._spans = defaultdict(lambda: defaultdict(list))
         self._banks = defaultdict(lambda: deque(maxlen=self.bank_size))
-        self._load_existing_banks()
+        self._load_existing_state()
         self._next_global_id = self._initial_next_global_id()
 
     def assign(self, camera: str, track_id: int, embedding, frame_index: int,
@@ -112,10 +115,24 @@ class IdentityService:
         candidate_gids = set()
         fallback_scores = defaultdict(lambda: -1.0)
         for hit in candidates:
-            gid = (hit.payload or {}).get("global_id")
+            payload = hit.payload or {}
+            # Never let detections from the exact same camera frame vote on
+            # each other. They are simultaneous observations, so one fresh
+            # track cannot be used to identify another track in that same frame.
+            if payload.get("camera") == camera and payload.get("frame") == frame_index:
+                continue
+
+            gid = payload.get("global_id")
             if gid is None:
                 continue   # a raw observation not yet identified -- skip
             gid = int(gid)
+
+            # Never let an identity win if it was already present in the same
+            # camera at an overlapping time. That would collapse two simultaneous
+            # people into one global id. We keep this guard live even when the
+            # optional topology constraints are disabled.
+            if self._same_camera_overlap(gid, camera, frame_index):
+                continue
 
             # ---- CONSTRAINT GATE (DESIGN.md) -- WHERE + WHEN --------------------
             # Before trusting appearance, veto candidates that are physically
@@ -173,8 +190,7 @@ class IdentityService:
             payload["crop_quality"] = crop_quality
         self.store.add(embedding, payload)
         self._add_to_bank(gid, embedding)
-        # Remember where/when this identity was last seen, for the constraint gate.
-        self._last_seen[int(gid)] = (camera, frame_index)
+        self._record_observation(gid, camera, frame_index)
 
     def _add_to_bank(self, gid, embedding):
         emb = np.asarray(embedding, dtype=np.float32).ravel()
@@ -199,8 +215,8 @@ class IdentityService:
         proto = proto / proto_norm
         return float(proto @ emb)
 
-    def _load_existing_banks(self):
-        """Warm banks from a persistent store, capped per global_id."""
+    def _load_existing_state(self):
+        """Warm banks and span caches from a persistent store."""
         try:
             offset = None
             while True:
@@ -216,10 +232,41 @@ class IdentityService:
                         vector = next(iter(vector.values()), None)
                     if vector is not None:
                         self._add_to_bank(gid, vector)
+                    payload = p.payload or {}
+                    camera = payload.get("camera")
+                    frame = payload.get("frame")
+                    if camera is not None and frame is not None:
+                        self._record_span_only(gid, camera, int(frame))
                 if offset is None:
                     break
         except Exception:
             self._banks.clear()
+            self._spans.clear()
+
+    def _record_span_only(self, gid, camera, frame_index):
+        """Update cached time spans without touching banks or last_seen."""
+        spans = self._spans[int(gid)][camera]
+        if spans and frame_index <= spans[-1][1] + 1:
+            spans[-1][1] = max(spans[-1][1], frame_index)
+        else:
+            spans.append([frame_index, frame_index])
+
+    def _record_observation(self, gid, camera, frame_index):
+        """Update caches after committing one observation."""
+        self._record_span_only(gid, camera, frame_index)
+        self._last_seen[int(gid)] = (camera, frame_index)
+
+    def _same_camera_overlap(self, gid, camera, frame_index):
+        """
+        True if this identity already has any observation span in `camera` that
+        strictly contains `frame_index`. Boundary touches are allowed so a
+        handoff between two track ids can still reuse the same identity.
+        """
+        spans = self._spans.get(int(gid), {}).get(camera, [])
+        for start, end in spans:
+            if start < frame_index < end:
+                return True
+        return False
 
     def _initial_next_global_id(self):
         """

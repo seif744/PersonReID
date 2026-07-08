@@ -653,11 +653,13 @@ def main():
     if store_cfg.get("enabled"):
         from database.store import PersonVectorStore
         # URL: env var wins over config.yaml. API key: env only (never committed).
-        
+        url = os.environ.get("QDRANT_URL") or store_cfg.get("url") or None
+        api_key = os.environ.get("QDRANT_API_KEY") or None
         path = store_cfg.get("path", "qdrant_data")
-        store = PersonVectorStore(path=path)
-        print(f"[main] Vector store ready at LOCAL '{path}' "
-        f"(existing points: {store.count()}).")
+        store = PersonVectorStore(path=path, url=url, api_key=api_key)
+        backend = url if url else f"LOCAL '{path}'"
+        print(f"[main] Vector store ready at {backend} "
+              f"(existing points: {store.count()}).")
 
         if args.reset:
             store.reset()
@@ -726,18 +728,28 @@ def main():
     # populated, merge global ids that are the same person across cameras.
     recon_cfg = id_cfg.get("reconcile", {}) if id_cfg else {}
     if identity is not None and recon_cfg.get("enabled"):
-        from identity.reconcile import reconcile_global_ids
+        from identity.reconcile import reconcile_global_ids, reconcile_tracklets
         threshold = recon_cfg.get("threshold")
         if threshold is None:
             threshold = id_cfg.get("threshold", 0.85)
         print("[main] Reconciling identities across cameras...")
-        reconcile_global_ids(
-            store,
-            threshold=threshold,
-            run_id=run_id,
-            block_same_camera_overlap=recon_cfg.get("block_same_camera_overlap", True),
-            require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
-        )
+        if recon_cfg.get("tracklet_first", True):
+            reconcile_tracklets(
+                store,
+                threshold=threshold,
+                run_id=run_id,
+                same_camera_threshold=recon_cfg.get("same_camera_threshold", 0.90),
+                require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
+                min_tracklet_observations=recon_cfg.get("min_tracklet_observations", 1),
+            )
+        else:
+            reconcile_global_ids(
+                store,
+                threshold=threshold,
+                run_id=run_id,
+                block_same_camera_overlap=recon_cfg.get("block_same_camera_overlap", True),
+                require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
+            )
 
     print_run_summary(store, jobs, cfg, run_id=run_id)
     print("[main] All done.")

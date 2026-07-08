@@ -63,6 +63,10 @@ class TrackEmbedder:
         self.max_brightness = quality.get("max_brightness", 235.0)
         self.min_aspect = quality.get("min_aspect", 0.20)
         self.max_aspect = quality.get("max_aspect", 1.20)
+        # Occlusion gate: reject a crop when another person's box covers more than
+        # this fraction of it. Such a crop mixes two bodies and poisons the
+        # gallery (the id_0008 "two people in one box" case). 1.0 = disabled.
+        self.max_occlusion_ratio = quality.get("max_occlusion_ratio", 1.0)
 
         # track_id -> {"embedding": (512,) np.ndarray, "frame": int last computed}
         self._cache = {}
@@ -112,6 +116,11 @@ class TrackEmbedder:
                     det.embedding = entry["embedding"]
                 continue
             quality = self._crop_quality(crop, frame.shape)
+            quality["occlusion"] = self._occlusion_ratio(det, detections)
+            if (quality["accepted"] and self.quality_enabled
+                    and quality["occlusion"] > self.max_occlusion_ratio):
+                quality["accepted"] = False
+                quality["reason"] = "occluded"
             det.crop_quality = quality
             if not quality["accepted"]:
                 rejected.append(det)
@@ -173,6 +182,27 @@ class TrackEmbedder:
                 metrics["reason"] = reason
                 break
         return metrics
+
+    def _occlusion_ratio(self, det, detections):
+        """
+        Largest fraction of this detection's box that is covered by ANOTHER
+        person's box in the same frame. High values mean the crop contains a
+        second body, so its embedding would blend two people.
+        """
+        area = max(1, (det.x2 - det.x1) * (det.y2 - det.y1))
+        worst = 0.0
+        for other in detections:
+            if other is det:
+                continue
+            ix1 = max(det.x1, other.x1)
+            iy1 = max(det.y1, other.y1)
+            ix2 = min(det.x2, other.x2)
+            iy2 = min(det.y2, other.y2)
+            iw, ih = ix2 - ix1, iy2 - iy1
+            if iw <= 0 or ih <= 0:
+                continue
+            worst = max(worst, (iw * ih) / area)
+        return worst
 
     def _evict_stale(self, frame_index):
         """Drop tracks not refreshed within `ttl` frames (they've left view)."""

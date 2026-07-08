@@ -49,6 +49,8 @@ reid:
     max_brightness: 235.0
     min_aspect: 0.20         # width / height
     max_aspect: 1.20
+    max_occlusion_ratio: 0.5 # reject a crop if another person's box covers more
+                             # than this fraction of it (multi-person crop)
 
 # Vector store (Qdrant). Live embeddings are written here as the video plays.
 # This stage stores observations; assigning global ids is handled by the
@@ -60,13 +62,13 @@ store:
   # url here (non-secret) OR via the QDRANT_URL env var; when a url is present it
   # overrides `path`. The API key is a SECRET -- read only from the QDRANT_API_KEY
   # env var (see .env), never from this committed file.
-  url:                       # e.g. https://xxxx.<region>.aws.cloud.qdrant.io:6333
+  url: http://localhost:6333 # local Docker Qdrant server; clear this to use path
 
 # Identity Service (Stage 7): turns stored embeddings into stable global ids.
 # It is the ONLY component that assigns identity (the model + store never do).
 identity:
   enabled: true
-  threshold: 0.80           # cosine to accept a match. CALIBRATE per deployment
+  threshold: 0.85  # cosine to accept a match. CALIBRATE per deployment
                              # (see the sweep in src/identity/demo_identity.py).
                              # Lower values merge more; higher values split more.
   top_k: 50                  # nearest candidates to consider before deciding
@@ -94,6 +96,10 @@ identity:
   reconcile:
     enabled: true
     threshold:               # prototype cosine to merge; blank = use identity.threshold
+    tracklet_first: true      # rebuild ids from camera-local tracks, not polluted gids
+    same_camera_threshold: 0.90  # stricter merge for fragmented tracks in one camera
+    min_tracklet_observations: 3  # a real identity needs >= this many observations;
+                                   # shorter tracks are detector noise, not people
     block_same_camera_overlap: true   # never merge ids co-present in one camera (two bodies)
     require_reciprocal_best: true      # merge a pair only if they are each other's best
                                        # match -- stops look-alike over-merging on

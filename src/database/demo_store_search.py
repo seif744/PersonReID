@@ -32,7 +32,13 @@ import cv2
 from reid.extractor import ReIDExtractor
 from database.store import PersonVectorStore
 
-CROPS_ROOT = os.path.join(os.path.dirname(__file__), "..", "reid", "crops")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ROOT_CROPS = os.path.join(PROJECT_ROOT, "crops")
+LEGACY_CROPS = os.path.join(os.path.dirname(__file__), "..", "reid", "crops")
+if os.path.isdir(ROOT_CROPS):
+    CROPS_ROOT = ROOT_CROPS
+else:
+    CROPS_ROOT = LEGACY_CROPS
 WEIGHTS = os.path.join(os.path.dirname(__file__), "..", "reid", "weights",
                        "osnet_x1_0_market1501.pth")
 QDRANT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "qdrant_data")

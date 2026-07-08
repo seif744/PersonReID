@@ -51,6 +51,8 @@ DEFAULT_COLLECTION = "persons"
 class PersonVectorStore:
     def __init__(self, path: str = "qdrant_data", *,
                 client: Optional[QdrantClient] = None,
+                 url: Optional[str] = None,
+                 api_key: Optional[str] = None,
                  collection: str = DEFAULT_COLLECTION,
                  dim: int = EMBEDDING_DIM):
         """
@@ -71,7 +73,10 @@ class PersonVectorStore:
         if client is not None:
             self.client = client
         else:
-            self.client = QdrantClient(path=path)
+            if url:
+                self.client = QdrantClient(url=url, api_key=api_key)
+            else:
+                self.client = QdrantClient(path=path)
         self.collection = collection
         self.dim = dim
         self._ensure_collection()
@@ -140,6 +145,22 @@ class PersonVectorStore:
         self.client.set_payload(
             collection_name=self.collection,
             payload={"global_id": int(global_id)},
+            points=list(point_ids),
+        )
+
+    def clear_global_id(self, point_ids: List[str]) -> None:
+        """
+        Remove the global_id payload key from points, marking them unidentified.
+
+        Used by reconciliation to suppress spurious tracklets (e.g. one-frame
+        detector noise) so they are not counted as real people. The observations
+        stay in the gallery (vectors intact) but no longer carry an identity.
+        """
+        if not point_ids:
+            return
+        self.client.delete_payload(
+            collection_name=self.collection,
+            keys=["global_id"],
             points=list(point_ids),
         )
 
