@@ -671,18 +671,14 @@ def main():
     id_cfg = cfg.get("identity", {})
     if id_cfg.get("enabled") and store is not None:
         from identity.service import IdentityService
-        from identity.constraints import ConstraintGate
-        gate = ConstraintGate.from_config(id_cfg.get("constraints"))
         identity = IdentityService(
             store,
             threshold=id_cfg.get("threshold", 0.85),
             top_k=id_cfg.get("top_k", 10),
             bank_size=id_cfg.get("bank_size", 20),
             min_score_gap=id_cfg.get("min_score_gap", 0.03),
-            constraints=gate,
         )
-        gate_msg = " (topology/timing gate ON)" if gate is not None else ""
-        print(f"[main] Identity Service enabled -> assigning GLOBAL ids{gate_msg}.")
+        print("[main] Identity Service enabled -> assigning GLOBAL ids.")
 
     # ---- Shared state between worker threads and the display loop ------------
     # frames: {name: latest annotated frame}   done: {names that finished}
@@ -728,28 +724,19 @@ def main():
     # populated, merge global ids that are the same person across cameras.
     recon_cfg = id_cfg.get("reconcile", {}) if id_cfg else {}
     if identity is not None and recon_cfg.get("enabled"):
-        from identity.reconcile import reconcile_global_ids, reconcile_tracklets
+        from identity.reconcile import reconcile_tracklets
         threshold = recon_cfg.get("threshold")
         if threshold is None:
             threshold = id_cfg.get("threshold", 0.85)
         print("[main] Reconciling identities across cameras...")
-        if recon_cfg.get("tracklet_first", True):
-            reconcile_tracklets(
-                store,
-                threshold=threshold,
-                run_id=run_id,
-                same_camera_threshold=recon_cfg.get("same_camera_threshold", 0.90),
-                require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
-                min_tracklet_observations=recon_cfg.get("min_tracklet_observations", 1),
-            )
-        else:
-            reconcile_global_ids(
-                store,
-                threshold=threshold,
-                run_id=run_id,
-                block_same_camera_overlap=recon_cfg.get("block_same_camera_overlap", True),
-                require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
-            )
+        reconcile_tracklets(
+            store,
+            threshold=threshold,
+            run_id=run_id,
+            same_camera_threshold=recon_cfg.get("same_camera_threshold", 0.90),
+            require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
+            min_tracklet_observations=recon_cfg.get("min_tracklet_observations", 1),
+        )
 
     print_run_summary(store, jobs, cfg, run_id=run_id)
     print("[main] All done.")

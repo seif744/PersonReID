@@ -24,11 +24,12 @@ already has continuity (ByteTrack follows it frame-to-frame); re-deciding every
 frame would let the id flicker. So (camera, track_id) -> global_id is sticky.
 
 ------------------------------- V1 SCOPE ----------------------------------
-This first version decides on APPEARANCE + a threshold only. We proved in Phase 4
+This version decides on APPEARANCE + a threshold only. We proved in Phase 4
 that appearance alone has overlapping tails (same-min 0.51 < diff-max 0.85), so
-this WILL make mistakes on hard cases. The camera-topology / temporal / motion
-constraints that fix those are marked with CONSTRAINT HOOK below -- structured
-in, implemented later, exactly as DESIGN.md specifies.
+this WILL make mistakes on hard cases; the durable fix is a stronger, domain-
+appropriate embedding model, not more heuristics here. One physical guard is
+kept: an identity cannot be reused for a track that overlaps it in time within
+the same camera (two co-present tracks are two different people).
 
 Threadsafety: this class is NOT thread-safe (mints ids, mutates a dict). When
 wired into the multi-camera main.py, guard assign() with a lock -- like the
@@ -43,8 +44,7 @@ import numpy as np
 
 class IdentityService:
     def __init__(self, store, threshold: float = 0.85, top_k: int = 10,
-                 bank_size: int = 20, min_score_gap: float = 0.03,
-                 constraints=None):
+                 bank_size: int = 20, min_score_gap: float = 0.03):
         """
         store     : a PersonVectorStore used as the identity gallery.
         threshold : minimum cosine score to accept a candidate as the SAME
@@ -65,19 +65,14 @@ class IdentityService:
                     prototype scoring.
         min_score_gap : require the best identity to beat the second-best by
                         this margin, reducing ambiguous look-alike merges.
-        constraints   : an optional ConstraintGate (constraints.py) that vetoes
-                        candidates which are physically implausible given camera
-                        topology + timing. None = appearance only (v1 behavior).
         """
         self.store = store
         self.threshold = threshold
         self.top_k = top_k
         self.bank_size = max(1, int(bank_size))
         self.min_score_gap = max(0.0, float(min_score_gap))
-        self.constraints = constraints
 
         self._track_to_global = {}   # (camera, track_id) -> global_id  (sticky)
-        self._last_seen = {}         # global_id -> (camera, frame) most recent
         # global_id -> camera -> list of [start_frame, end_frame] spans.
         # Live matching uses this to reject same-camera overlap before a merge.
         self._spans = defaultdict(lambda: defaultdict(list))
@@ -129,28 +124,9 @@ class IdentityService:
 
             # Never let an identity win if it was already present in the same
             # camera at an overlapping time. That would collapse two simultaneous
-            # people into one global id. We keep this guard live even when the
-            # optional topology constraints are disabled.
+            # people into one global id.
             if self._same_camera_overlap(gid, camera, frame_index):
                 continue
-
-            # ---- CONSTRAINT GATE (DESIGN.md) -- WHERE + WHEN --------------------
-            # Before trusting appearance, veto candidates that are physically
-            # implausible: a person last seen in another camera can only match here
-            # if there was time to walk the path between them (topology + timing;
-            # see constraints.py). This turns "closest vector" into "closest
-            # PLAUSIBLE person" and is what stops look-alikes in different places
-            # from being fused. No gate configured -> appearance only (v1).
-            # (Motion down-weighting, the third hook, needs trajectory data not yet
-            # in this path -- documented in constraints.py, not stubbed here.)
-            if self.constraints is not None:
-                prev = self._last_seen.get(gid)
-                if prev is not None:
-                    ok, _reason = self.constraints.allows(
-                        camera, frame_index, prev[0], prev[1])
-                    if not ok:
-                        continue   # implausible here/now -- drop this candidate
-            # --------------------------------------------------------------------
 
             candidate_gids.add(gid)
             fallback_scores[gid] = max(fallback_scores[gid], float(hit.score))
@@ -190,7 +166,7 @@ class IdentityService:
             payload["crop_quality"] = crop_quality
         self.store.add(embedding, payload)
         self._add_to_bank(gid, embedding)
-        self._record_observation(gid, camera, frame_index)
+        self._record_span(gid, camera, frame_index)
 
     def _add_to_bank(self, gid, embedding):
         emb = np.asarray(embedding, dtype=np.float32).ravel()
@@ -236,25 +212,20 @@ class IdentityService:
                     camera = payload.get("camera")
                     frame = payload.get("frame")
                     if camera is not None and frame is not None:
-                        self._record_span_only(gid, camera, int(frame))
+                        self._record_span(gid, camera, int(frame))
                 if offset is None:
                     break
         except Exception:
             self._banks.clear()
             self._spans.clear()
 
-    def _record_span_only(self, gid, camera, frame_index):
-        """Update cached time spans without touching banks or last_seen."""
+    def _record_span(self, gid, camera, frame_index):
+        """Extend this identity's per-camera time spans with one observation."""
         spans = self._spans[int(gid)][camera]
         if spans and frame_index <= spans[-1][1] + 1:
             spans[-1][1] = max(spans[-1][1], frame_index)
         else:
             spans.append([frame_index, frame_index])
-
-    def _record_observation(self, gid, camera, frame_index):
-        """Update caches after committing one observation."""
-        self._record_span_only(gid, camera, frame_index)
-        self._last_seen[int(gid)] = (camera, frame_index)
 
     def _same_camera_overlap(self, gid, camera, frame_index):
         """
