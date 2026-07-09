@@ -283,22 +283,4 @@ Generated at runtime (gitignored): `crops/`, `output_*.mp4`, `reports/`,
 
 ---
 
-## 10. Known limitations & roadmap
 
-This is a **working prototype**, not a drop-in product. Be aware:
-
-- **The ReID model is the accuracy ceiling.** OSNet/Market-1501 is out-of-domain
-  for typical CCTV: on the sample footage, same-person cross-camera similarity
-  (0.68–0.82) *overlaps* different-person similarity (0.84–0.86), so no threshold
-  is perfectly separable. It reliably catches easy (front-facing) cross-camera
-  matches and misses hard ones (back views, heavy occlusion, low light).
-- **Thresholds are calibrated to the current footage.** A new camera site needs
-  re-calibration.
-- **The fix is a domain-appropriate model** — synthetic pretraining (RandPerson)
-  and/or fine-tuning on target-domain crops — which widens the same-vs-different
-  gap so a threshold works. See `notebooks/02_Train_RandPerson_Colab.ipynb` and
-  `tools/prepare_randperson_subset.py`.
-
-Roadmap priorities: train/obtain a generalizable ReID model, add a per-deployment
-calibration/onboarding step, and add an evaluation harness that reports
-cross-camera recall on labeled footage.
