@@ -1,142 +1,286 @@
-# Person Re-ID Pipeline
+# Multi-Camera Person Re-Identification
 
-This repository contains a multi-camera person re-identification prototype that combines:
+Detect and track people across multiple camera videos, embed their appearance,
+and assign a **global ID** that stays the same for one real person **across
+cameras** and **across re-appearances**. Produces annotated videos, per-person
+crops, and a cross-camera match report.
 
-- person detection with YOLO
-- per-camera tracking
-- crop saving for each tracked person
-- appearance embedding with a ReID model
-- vector storage with Qdrant
-- identity assignment through a dedicated identity service
+> **How it works internally:** see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
+> full data flow, every component, the concurrency model, and design rationale.
+> This README is the *get-it-running* guide.
 
-The current code is not a polished end-user application yet. It is a working research-style pipeline that can be run from the project root and produces artifacts such as crops, embeddings, annotated videos, and cross-camera reports.
+---
 
-## Current status
+## Table of contents
+1. [Prerequisites](#1-prerequisites)
+2. [Install the Python environment](#2-install-the-python-environment)
+3. [Model weights](#3-model-weights)
+4. [Set up Qdrant (the vector store)](#4-set-up-qdrant-the-vector-store)
+5. [Configure your run](#5-configure-your-run)
+6. [Run the pipeline](#6-run-the-pipeline)
+7. [Understand the output](#7-understand-the-output)
+8. [Troubleshooting](#8-troubleshooting)
+9. [Project layout](#9-project-layout)
+10. [Known limitations & roadmap](#10-known-limitations--roadmap)
 
-The pipeline in [main.py](main.py) now runs the following stages:
+---
 
-| Stage | Component | Status |
-|---|---|---|
-| 1-2 | Video input and frame reading | Working |
-| 3 | Person detection | Working |
-| 4 | Per-camera tracking | Working |
-| 5 | Crop saving and annotation drawing | Working |
-| 6 | ReID embedding and storage | Working |
-| 7 | Identity assignment | Present, but still needs tuning and validation |
-| 8 | Full clustering / production-grade identity logic | Not yet complete |
+## 1. Prerequisites
 
-## What the repo does right now
+- **Python 3.10** (the project is verified on 3.10.12).
+- **Docker** + **Docker Compose** — used to run the Qdrant vector database.
+  Install Docker Desktop (Windows/macOS) or Docker Engine (Linux). Verify:
+  ```bash
+  docker --version
+  docker compose version
+  ```
+- **One or more video files** (e.g. `.avi`, `.mp4`). RTSP URLs also work.
+  CPU-only is fine — the whole pipeline runs on CPU.
 
-From the project root, you can run [main.py](main.py) to process one or more video sources defined in [config.yaml](config.yaml). The pipeline will:
+---
 
-- load each configured video source
-- detect people in each frame
-- track them per camera
-- save crops to the configured crops directory
-- embed tracks with the ReID model
-- store embeddings in a local Qdrant store
-- optionally assign global IDs and write cross-camera summary reports
+## 2. Install the Python environment
 
-## Main files
-
-| File | Purpose |
-|---|---|
-| [main.py](main.py) | Main entry point and orchestration for the full pipeline |
-| [config.yaml](config.yaml) | Runtime configuration for sources, detection, tracking, crops, ReID, store, identity, and display |
-| [src/detector.py](src/detector.py) | Detection and tracking wrapper around YOLO/ByteTrack |
-| [src/reid/extractor.py](src/reid/extractor.py) | ReID embedding extraction |
-| [src/reid/service.py](src/reid/service.py) | Throttled track embedding logic |
-| [src/database/store.py](src/database/store.py) | Qdrant vector store wrapper |
-| [src/identity/service.py](src/identity/service.py) | Identity assignment service |
-| [src/video_source.py](src/video_source.py) | Frame source abstraction |
-| [src/crop_saver.py](src/crop_saver.py) | Crop persistence per track |
-
-## Setup
-
-This repo currently expects a Python environment with the required ML and computer-vision dependencies installed manually.
-
-The main packages used by the code are:
-
-- `opencv-python`
-- `numpy`
-- `pyyaml`
-- `ultralytics`
-- `torch`
-- `torchreid`
-- `qdrant-client`
-
-A pinned `requirements.txt` file is not present yet, so dependency installation is still a manual step.
-
-Example setup:
+From the project root:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
-python -m pip install opencv-python numpy pyyaml ultralytics torch qdrant-client
+python -m pip install -r requirements.txt
 ```
 
-If you want the ReID extractor to work, the model checkpoint at [src/reid/weights/osnet_x1_0_market1501.pth](src/reid/weights/osnet_x1_0_market1501.pth) must be available.
+`requirements.txt` pins the exact verified versions (ultralytics, torch,
+torchvision, torchreid, qdrant-client, numpy, opencv-python, PyYAML).
 
-## Configuration
+> **CPU vs GPU torch:** `requirements.txt` pins CPU-compatible `torch`/
+> `torchvision`. For a specific CUDA build, install torch from the official
+> PyTorch wheel index for your platform *before* `-r requirements.txt`.
 
-Edit [config.yaml](config.yaml) before running:
+---
 
-- `source.videos`: add or change the input video files or RTSP sources
-- `detector.*`: detection threshold and model settings
-- `reid.*`: enable/disable ReID, choose the weights path, and tune the embedding interval
-- `store.*`: point at a local Qdrant store or a remote Qdrant server
-- `identity.*`: tune the identity threshold and related decision logic
-- `display.*`: enable/disable windows and annotated video output
+## 3. Model weights
 
-The current configuration points to local video files, so it is not yet fully portable out of the box.
+Two model files are needed:
 
-## Run
+| File | How to get it | Committed? |
+|---|---|---|
+| `yolo11n.pt` (detector) | **Auto-downloaded** by ultralytics on first run | No (gitignored) |
+| `src/reid/weights/osnet_x1_0_market1501.pth` (ReID) | Must be present at this path | No (large binary) |
 
-From the repository root:
+The OSNet checkpoint ships in this working tree. If you clone fresh and it's
+missing, download `osnet_x1_0_market1501.pth` from the torchreid model zoo and
+place it at `src/reid/weights/`. The path is set by `reid.weights` in
+`config.yaml`.
+
+---
+
+## 4. Set up Qdrant (the vector store)
+
+Embeddings are stored in **Qdrant**. The recommended setup is the Dockerized
+server (supports concurrent writes from all camera threads; the embedded mode
+locks to one process).
+
+### 4a. Start the Qdrant server (recommended)
+
+A `docker-compose.yml` is included. From the project root:
+
+```bash
+docker compose up -d          # start Qdrant in the background
+docker compose logs -f        # (optional) watch logs; Ctrl-C to stop watching
+```
+
+This launches `qdrant/qdrant:latest` and exposes:
+- **REST API + dashboard:** http://localhost:6333/dashboard
+- **gRPC (optional):** `localhost:6334`
+
+Data persists in `./qdrant_storage/` (gitignored), so it survives restarts.
+
+Verify it's up:
+```bash
+curl http://localhost:6333/readyz        # -> "all shards are ready"
+```
+
+Stop it later with `docker compose down` (your data is kept).
+
+### 4b. Tell the pipeline where Qdrant is
+
+The store backend is chosen with this precedence: **`QDRANT_URL` env var → 
+`store.url` in config.yaml → `store.path` (embedded fallback)**.
+
+Out of the box, `config.yaml` already has:
+```yaml
+store:
+  url: http://localhost:6333
+```
+so no extra step is needed for local Docker. If you prefer env-based config,
+create a `.env` file in the project root:
+```
+QDRANT_URL=http://localhost:6333
+```
+
+For **Qdrant Cloud** instead of local Docker, set both (the API key is a secret —
+`.env` is gitignored, never commit it):
+```
+QDRANT_URL=https://<your-cluster>.cloud.qdrant.io:6333
+QDRANT_API_KEY=<your-key>
+```
+
+### 4c. Alternative: embedded mode (no Docker)
+
+For a quick single-process run without Docker, clear the URL so it falls back to
+an on-disk embedded store:
+```yaml
+store:
+  url:                 # leave blank
+  path: qdrant_data    # local folder, created automatically
+```
+Note: embedded mode locks the folder to one process and is dev-only.
+
+---
+
+## 5. Configure your run
+
+Edit [config.yaml](config.yaml). The key sections:
+
+```yaml
+source:
+  videos:                        # one entry per camera
+    - name: cam_219
+      path: your_camera_1.avi
+    - name: cam_224
+      path: your_camera_2.avi
+  max_frames: 0                  # 0 = whole video; N = stop early (quick test)
+  resize_width: 0                # 0 = native; e.g. 1280 = faster on CPU
+
+detector:
+  model: yolo11n.pt              # auto-downloaded
+  confidence_threshold: 0.4
+
+tracker:
+  enabled: true
+  config: bytetrack.yaml
+
+crops:
+  save: true
+  interval: 10                   # save a crop every N frames per track
+
+reid:
+  enabled: true
+  weights: src/reid/weights/osnet_x1_0_market1501.pth
+  device: cpu                    # "cuda" if you have a GPU
+  interval: 10                   # re-embed a track at most every N frames
+
+store:
+  enabled: true
+  url: http://localhost:6333     # Qdrant server (see section 4)
+
+identity:
+  enabled: true
+  threshold: 0.85                # cosine to accept a live match
+  reconcile:                     # offline cross-camera pass (runs after all cams)
+    enabled: true
+    same_camera_threshold: 0.90
+    min_tracklet_observations: 3
+    require_reciprocal_best: true
+
+display:
+  show_window: false             # true = live OpenCV windows; false = headless
+  save_annotated: true           # write output_<camera>.mp4
+```
+
+See [ARCHITECTURE.md §7](ARCHITECTURE.md) for what every knob does.
+
+---
+
+## 6. Run the pipeline
+
+With the venv active and Qdrant running:
 
 ```bash
 python main.py
 ```
 
-Useful options:
+Start from a clean gallery (wipes the store first):
 
 ```bash
 python main.py --reset
 ```
 
-The `--reset` flag clears the Qdrant store before the run so you can start from a fresh gallery.
+Headless (`display.show_window: false`) runs to completion and prints a summary.
+With windows enabled, press `q` in a window to stop early.
 
-## Outputs
+---
 
-A run can generate:
+## 7. Understand the output
 
-- per-track crops under [crops](crops)
-- annotated videos such as `output_<camera>.mp4`
-- a local Qdrant store under [qdrant_data](qdrant_data)
-- cross-camera reports under [reports/cross_camera_matches](reports/cross_camera_matches)
+A run produces:
 
-## Current issues and what still needs work
+| Artifact | Location | What it is |
+|---|---|---|
+| Per-person crops | `crops/<camera>/id_<track>/` | sampled crops per track (debug + future training data) |
+| Annotated videos | `output_<camera>.mp4` | source video with boxes + IDs drawn |
+| Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
+| Cross-camera report | `reports/cross_camera_matches/summary.txt` | which global IDs appeared in >1 camera |
+| Contact sheets | `reports/cross_camera_matches/gid_*.jpg` | side-by-side crops per cross-camera person |
 
-The repository is functional as a prototype, but several things still need cleanup or hardening:
+The console prints a **RUN SUMMARY** at the end, e.g.:
+```
+Store: 516 observations -> 11 distinct people (global_ids)
+Cross-camera people: 1
+  GID 1: cam_219 (track 0004 + 0025) + cam_224 (track 0001)
+```
+- **distinct people** = number of global IDs after reconciliation.
+- **Cross-camera people** = global IDs seen in more than one camera (the product's
+  core result).
 
-1. Dependency management is incomplete
-   - There is no pinned requirements file yet.
-   - Setup depends on manually installing the needed packages.
+---
 
-2. Configuration is still environment-specific
-   - The default sources in [config.yaml](config.yaml) assume specific local video paths.
-   - The repo would be easier to use with a sample input or a more generic example config.
+## 8. Troubleshooting
 
-3. Identity assignment needs validation
-   - The identity service is present, but the matching threshold and policy still need calibration on real data.
-   - Cross-camera matching quality is not yet trustworthy enough for production use.
+| Symptom | Cause / fix |
+|---|---|
+| `Connection refused` / store errors | Qdrant isn't running. `docker compose up -d`, then `curl http://localhost:6333/readyz`. |
+| `Unexpected checkpoint keys dropped` | Wrong/corrupt ReID weights. Re-fetch `osnet_x1_0_market1501.pth` to `src/reid/weights/`. |
+| Hangs on first run for a while | `yolo11n.pt` is downloading; subsequent runs are fast. |
+| Very slow on CPU | Set `source.resize_width: 1280` and/or `source.max_frames` for tests. |
+| "database is locked" | Embedded mode (`store.path`) is single-process. Use the Docker server (`store.url`). |
+| No windows appear | `display.show_window: false` (headless). Set `true` for live windows. |
+| Counts look too high / people split | Expected on out-of-domain footage — see limitations below. |
 
-4. Runtime behavior is still a research workflow
-   - Headless mode and live-window mode both work, but the project is still optimized for local experimentation rather than a packaged deployment.
-   - There is no complete evaluation suite or benchmark script yet.
+---
 
-5. Documentation and examples need to be kept in sync
-   - Demo scripts in [src/reid](src/reid) and [src/identity](src/identity) are useful, but the repo would benefit from a clearer “quick start” and “advanced usage” split.
+## 9. Project layout
+
+```
+main.py                     entry point + per-camera orchestration
+config.yaml                 all runtime configuration
+requirements.txt            pinned dependencies
+docker-compose.yml          Qdrant server
+ARCHITECTURE.md             deep-dive: data flow, components, design
+src/
+  video_source.py           frame decoding
+  detector.py               YOLO11 + ByteTrack, Detection, crop_person
+  crop_saver.py             per-track crop persistence
+  drawing.py                boxes / HUD overlay
+  reid/
+    extractor.py            crop -> 512-d L2-normalized embedding (OSNet)
+    service.py              TrackEmbedder: throttle, cache, quality + occlusion gates
+    weights/                ReID model checkpoint
+  database/
+    store.py                Qdrant wrapper (PersonVectorStore)
+  identity/
+    service.py              live global-ID assignment (candidate->decide->commit)
+    reconcile.py            offline cross-camera reconciliation
+    DESIGN.md               why the layers are separated
+tools/
+  prepare_randperson_subset.py   dataset prep for the model-fix path
+notebooks/                  training/experiment notebooks (incl. RandPerson)
+```
+
+Generated at runtime (gitignored): `crops/`, `output_*.mp4`, `reports/`,
+`qdrant_storage/`, `qdrant_data/`.
+
+---
 
 

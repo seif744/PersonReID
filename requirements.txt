@@ -1,0 +1,19 @@
+# Runtime dependencies for the multi-camera person ReID pipeline.
+# Pins reflect the versions verified working in the project venv.
+# Install:  pip install -r requirements.txt
+
+# --- Detection + tracking -------------------------------------------------
+ultralytics==8.4.89        # YOLO11 detector + ByteTrack tracker
+
+# --- ReID model (appearance embeddings) -----------------------------------
+torch==2.12.1              # OSNet inference backend
+torchvision==0.27.1        # required by torchreid / ultralytics
+torchreid==0.2.5           # OSNet model definition
+
+# --- Vector store ---------------------------------------------------------
+qdrant-client==1.18.0      # embedding storage + nearest-neighbour search
+
+# --- Core numerics / IO ---------------------------------------------------
+numpy==2.2.6
+opencv-python==5.0.0.93    # frame decode, crops, drawing, video writing
+PyYAML==6.0.3              # reads config.yaml
