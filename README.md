@@ -139,14 +139,4 @@ The repository is functional as a prototype, but several things still need clean
 5. Documentation and examples need to be kept in sync
    - Demo scripts in [src/reid](src/reid) and [src/identity](src/identity) are useful, but the repo would benefit from a clearer “quick start” and “advanced usage” split.
 
-## Recommended next steps
 
-If you want to turn this into a more reliable project, the next priorities should be:
-
-- add a proper dependency file such as `requirements.txt`
-- add a sample dataset or a clearly documented example input
-- add smoke tests for detection, embedding, and store wiring
-- improve identity threshold tuning and add evaluation metrics
-- add clearer CLI flags and better error handling for missing files or missing Qdrant setup
-
-This README now reflects the current codebase more closely than the previous version and highlights the main limitations that still need attention.
