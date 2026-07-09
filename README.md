@@ -63,15 +63,15 @@ torchvision, torchreid, qdrant-client, numpy, opencv-python, PyYAML).
 
 Two model files are needed:
 
-| File | How to get it | In a fresh clone? |
+| File | How to get it | Committed? |
 |---|---|---|
-| `yolo11n.pt` (detector) | **Auto-downloaded** by ultralytics on first run | No (gitignored; fetched automatically) |
-| `src/reid/weights/osnet_x1_0_market1501.pth` (ReID) | **Committed to the repo** | Yes — already present |
+| `yolo11n.pt` (detector) | **Auto-downloaded** by ultralytics on first run | No (gitignored) |
+| `src/reid/weights/osnet_x1_0_market1501.pth` (ReID) | Must be present at this path | No (large binary) |
 
-The OSNet checkpoint is committed, so a fresh clone already has it — no download
-step. (If it is ever missing, get `osnet_x1_0_market1501.pth` from the torchreid
-model zoo and place it at `src/reid/weights/`.) The path is set by `reid.weights`
-in `config.yaml`.
+The OSNet checkpoint ships in this working tree. If you clone fresh and it's
+missing, download `osnet_x1_0_market1501.pth` from the torchreid model zoo and
+place it at `src/reid/weights/`. The path is set by `reid.weights` in
+`config.yaml`.
 
 ---
 
@@ -140,11 +140,6 @@ Note: embedded mode locks the folder to one process and is dev-only.
 ---
 
 ## 5. Configure your run
-
-> **Runs out of the box:** the repo ships with two sample videos
-> (`vlc-record-…219….avi` and `…224….avi`) and the default `config.yaml` already
-> points at them. With Qdrant running (section 4), `python main.py` works with no
-> config changes. Edit `source.videos` below to process your own footage.
 
 Edit [config.yaml](config.yaml). The key sections:
 
