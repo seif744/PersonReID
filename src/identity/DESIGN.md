@@ -6,6 +6,21 @@
 > read by an engineer who will implement it later, and to stop identity logic
 > from leaking into the ReID model or the vector database.
 
+> **⚠️ Implementation status (2026-07).** This is the original *design intent*.
+> The code implements the responsibility **boundaries** (§1, §2, §4) exactly, but
+> the decision logic is deliberately simpler than §3.2 describes:
+>
+> - **Implemented today** (see **§3.5** for the authoritative description):
+>   appearance similarity + a per-identity feature bank, a match threshold with a
+>   runner-up margin, a same-camera time-overlap guard, and a sticky per-track
+>   decision — in the live `service.py`. **Cross-camera linking is done by an
+>   offline reconciliation pass** (`reconcile.py`) after all cameras finish.
+> - **NOT implemented (future work):** the temporal / camera-topology / motion
+>   **constraints** described in §3.2. They remain the planned route to higher
+>   accuracy but are **not in the code**. Until then, matching is appearance-only
+>   and its accuracy is bounded by the embedding model (see `README.md` §10 and
+>   `ARCHITECTURE.md`). Read §3.2 as a roadmap, not a description of the code.
+
 ---
 
 ## 0. Where this sits
@@ -103,7 +118,12 @@ each carrying metadata: `global_id`, `camera_id`, `last_seen_timestamp`,
 identities to a handful of *appearance-plausible* candidates. **Recall step
 only** — no decision yet.
 
-### 3.2 Constraint filtering & scoring (the actual intelligence)
+### 3.2 Constraint filtering & scoring — ⚠️ PLANNED, NOT IMPLEMENTED
+> This section is the intended future design. **None of these constraints are in
+> the current code** — an earlier stub was removed for being unused. What the code
+> does instead is in §3.5. Treat this as the roadmap for raising accuracy once the
+> embedding model is good enough to build on.
+
 Each candidate gets a fused score. Appearance is necessary but not sufficient;
 the other constraints are what break the ties appearance can't:
 
@@ -151,6 +171,39 @@ update `last_seen` camera/time/position. The gallery/feature-bank policy (keep N
 recent vectors per id? running mean? per-camera exemplars?) lives here — this is
 the "averaging" concern deliberately kept **out** of TrackEmbedder.
 
+### 3.5 What the code actually does today (authoritative)
+
+Two stages, both **appearance-driven** (no §3.2 constraints). This is the source
+of truth for the current behavior; `ARCHITECTURE.md` has the full detail.
+
+**Live — `service.py`, per track, sticky.** On a track's *first* observation:
+1. **Candidates** — Qdrant top-K (K=50) nearest stored observations.
+2. **Filter** — drop a candidate if it is the same camera + same frame (a
+   simultaneous observation), has no `global_id`, or its id already has a time
+   span **covering this frame in this camera** (two co-present tracks cannot be
+   one body).
+3. **Score** — each surviving candidate id is scored by its **feature bank**: the
+   renormalized mean of its recent embeddings (a prototype), cosine vs. the query.
+4. **Decide** — accept the best iff `score ≥ threshold` **and** it beats the
+   runner-up by `min_score_gap`; otherwise **mint** a new id. The result is cached
+   per `(camera, track_id)` so it never flickers frame-to-frame.
+5. **Commit** — store the observation under the chosen id; grow its bank and its
+   per-camera time spans.
+
+**Offline reconciliation — `reconcile.py`, after all cameras finish.** The sticky
+live decision has a blind spot: a person entering **two cameras at the same
+instant** is minted twice (neither camera's gallery holds the other yet) and can
+never link live. So a batch pass rebuilds identities from **tracklets** (one
+camera's view of one track) with the whole gallery visible:
+1. **Suppress** tracklets with too few observations (detector noise).
+2. **Same-camera defrag** — merge time-*disjoint* same-camera tracklets of one
+   person above a stricter cosine.
+3. **Cross-camera merge** — merge across cameras using **mutual nearest neighbour**
+   above threshold (stops one tracklet absorbing several look-alikes).
+
+A same-camera time-overlap guard forbids fusing two co-present tracks throughout.
+**This offline pass is what actually produces cross-camera identities today.**
+
 ---
 
 ## 4. Responsibility boundaries (the whole point)
@@ -164,7 +217,8 @@ the "averaging" concern deliberately kept **out** of TrackEmbedder.
 
 Everything above the Identity Service produces **measurements**. The Identity
 Service is the single place that turns measurements into a **decision**, using
-context (topology, time, motion) that none of the other components have. Keep it
+context none of the other components have — today that is appearance + time
+(same-camera co-presence); topology and motion (§3.2) are the roadmap. Keep it
 that way and each piece stays simple, testable, and swappable.
 
 ---
