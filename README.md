@@ -307,3 +307,7 @@ Generated at runtime (gitignored): `crops/`, `output_*.mp4`, `reports/`,
 ---
 
 
+
+2 input -> Crop -> At that time match the crops -> at the end we get a label tracker id and bonding box list 
+remove crop saving
+output video 
