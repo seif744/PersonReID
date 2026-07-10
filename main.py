@@ -334,24 +334,78 @@ def get_screen_size():
         return (1920, 1080)
 
 
+# Video file extensions we recognise when scanning a directory.
+VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg")
+
+
+def _is_url(path):
+    """True for stream URLs (rtsp://, http://) which have no on-disk file to check."""
+    return isinstance(path, str) and "://" in path
+
+
 def normalize_sources(videos):
     """
-    Turn the config's source.videos list into a clean list of (name, path).
+    Turn a list of video entries into a clean list of (name, path) with UNIQUE
+    names (names become crops/<name>/ and output_<name>.mp4, so collisions would
+    overwrite each other).
 
     Each entry may be either:
-      - a plain string path  -> name is derived from the file name, OR
-      - a dict {name, path}  -> we use the given friendly name.
+      - a plain string path/URL  -> name is derived from the file name, OR
+      - a dict {name, path}      -> we use the given friendly name.
     """
     result = []
+    used = set()
     for entry in videos:
         if isinstance(entry, dict):
             path = entry["path"]
-            name = entry.get("name") or os.path.splitext(os.path.basename(path))[0]
+            name = entry.get("name") or os.path.splitext(os.path.basename(str(path)))[0]
         else:
             path = entry
-            name = os.path.splitext(os.path.basename(path))[0]
+            name = os.path.splitext(os.path.basename(str(path)))[0]
+
+        name = name or "camera"
+        # De-duplicate: cam, cam_2, cam_3, ...
+        base, k = name, 1
+        while name in used:
+            k += 1
+            name = f"{base}_{k}"
+        used.add(name)
         result.append((name, path))
     return result
+
+
+def resolve_sources(args, cfg):
+    """
+    Decide which videos to process, dynamically. Precedence:
+        --videos <paths...>   >   --videos-dir <dir>   >   config source.videos
+
+    So the pipeline runs on ANY videos the user points at, without editing code
+    or config. Returns (sources, origin_description). Validates that local files
+    exist (stream URLs are skipped). Exits with a clear message on bad input.
+    """
+    if args.videos:
+        sources = normalize_sources(list(args.videos))
+        origin = "--videos"
+    elif args.videos_dir:
+        if not os.path.isdir(args.videos_dir):
+            raise SystemExit(f"[main] --videos-dir is not a directory: {args.videos_dir}")
+        files = [os.path.join(args.videos_dir, f)
+                 for f in sorted(os.listdir(args.videos_dir))
+                 if f.lower().endswith(VIDEO_EXTS)]
+        if not files:
+            raise SystemExit(f"[main] No video files ({', '.join(VIDEO_EXTS)}) "
+                             f"found in {args.videos_dir}")
+        sources = normalize_sources(files)
+        origin = f"--videos-dir {args.videos_dir}"
+    else:
+        sources = normalize_sources(cfg.get("source", {}).get("videos", []))
+        origin = "config.yaml (source.videos)"
+
+    missing = [p for _, p in sources if not _is_url(p) and not os.path.exists(p)]
+    if missing:
+        raise SystemExit("[main] These video files were not found:\n  "
+                         + "\n  ".join(missing))
+    return sources, origin
 
 
 def clear_directory(path):
@@ -565,6 +619,19 @@ def parse_args():
         help="Wipe the vector store collection before running, so a test starts "
              "from a clean gallery. DESTRUCTIVE -- deletes all stored embeddings.",
     )
+    p.add_argument(
+        "--videos", nargs="+", metavar="VIDEO", default=None,
+        help="One or more video files or RTSP/HTTP stream URLs to process, "
+             "space-separated. Overrides config source.videos. Each camera's name "
+             "is derived from the file name. Example: "
+             "--videos cam_a.mp4 cam_b.mp4",
+    )
+    p.add_argument(
+        "--videos-dir", metavar="DIR", default=None,
+        help="Process every video file in this directory "
+             f"({'/'.join(e.lstrip('.') for e in VIDEO_EXTS)}). "
+             "Overrides config source.videos.",
+    )
     return p.parse_args()
 
 
@@ -578,13 +645,14 @@ def main():
     crop_cfg = cfg["crops"]
     disp_cfg = cfg["display"]
 
-    sources = normalize_sources(cfg["source"]["videos"])
+    sources, src_origin = resolve_sources(args, cfg)
     if not sources:
-        print("[main] No videos listed under source.videos in config.yaml.")
+        print("[main] No videos to process. Pass --videos <paths...>, "
+              "--videos-dir <dir>, or set source.videos in config.yaml.")
         return
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    print(f"[main] Preparing {len(sources)} video(s): "
+    print(f"[main] Preparing {len(sources)} video(s) from {src_origin}: "
           f"{', '.join(n for n, _ in sources)}")
     print(f"[main] Run id: {run_id}")
 
@@ -602,6 +670,7 @@ def main():
             confidence_threshold=det_cfg["confidence_threshold"],
             person_class_id=det_cfg["person_class_id"],
             tracker_config=trk_cfg["config"],
+            pose_ensemble=det_cfg.get("pose_ensemble"),
         )
         crop_saver = None
         if crop_cfg["save"]:

@@ -111,7 +111,7 @@ class PersonDetector:
 
     def __init__(self, model_path="yolo11n.pt",
                  confidence_threshold=0.4, person_class_id=0,
-                 tracker_config="bytetrack.yaml"):
+                 tracker_config="bytetrack.yaml", pose_ensemble=None):
         # Loading the weights. The first time this runs, Ultralytics will
         # DOWNLOAD the yolo11n.pt file (~5 MB) automatically, then reuse it.
         print(f"[detector] Loading model '{model_path}' (first run may download it)...")
@@ -125,6 +125,26 @@ class PersonDetector:
         # (slower, uses appearance too). We don't need to create these files;
         # they come with the library.
         self.tracker_config = tracker_config
+
+        # ---- Pose ensemble: split boxes that merged two+ people ----
+        # The box detector/tracker sometimes wraps ONE box around two overlapping
+        # people (the crops/id_0008 case: two stacked bodies). Embedding that crop
+        # blends two identities. To catch it, we run a second, independent model
+        # -- a POSE model that finds one skeleton PER PERSON -- and, when a tracker
+        # box clearly contains >= 2 distinct pose bodies, we split it into the
+        # individual pose boxes. This is an ENSEMBLE: two models agreeing on how
+        # many people are really there. Off unless configured.
+        self.pose_cfg = pose_ensemble or {}
+        self.pose_model = None
+        if self.pose_cfg.get("enabled"):
+            pose_path = self.pose_cfg.get("pose_model", "yolo11n-pose.pt")
+            # Fraction of a pose body-box that must lie inside a tracker box to
+            # count as "contained in it". Body containment (not a loose face
+            # buffer) is what keeps a neighbour from triggering a false split.
+            self.min_containment = float(self.pose_cfg.get("min_containment", 0.6))
+            self.pose_conf = float(self.pose_cfg.get("conf", 0.25))
+            print(f"[detector] Loading pose ensemble model '{pose_path}'...")
+            self.pose_model = YOLO(pose_path)
 
         print("[detector] Model ready.")
 
@@ -160,7 +180,11 @@ class PersonDetector:
             persist=True,                    # remember tracks across calls
             verbose=False,
         )
-        return self._parse_results(results)
+        detections = self._parse_results(results)
+        # Ensemble post-step: split any tracker box that merged two+ people.
+        if self.pose_model is not None:
+            detections = self._split_merged_boxes(frame, detections)
+        return detections
 
     def _parse_results(self, results):
         """
@@ -204,3 +228,90 @@ class PersonDetector:
                 )
 
         return detections
+
+    # ======================= POSE ENSEMBLE (Stage 3.5) =======================
+    # These run only when pose_ensemble is enabled. They take the tracker's
+    # boxes and, using an independent pose model's per-person boxes, split any
+    # box that clearly contains two+ distinct people into one box per person.
+
+    def _split_merged_boxes(self, frame, detections):
+        """
+        Replace any tracker box that contains >= 2 distinct pose bodies with the
+        individual pose boxes. Boxes with 0-1 contained bodies pass through
+        unchanged, so this only ever *fixes* merges -- it never drops a person.
+        """
+        pose_boxes = self._pose_bodies(frame)
+        if not pose_boxes:
+            return detections
+
+        out = []
+        for det in detections:
+            tbox = (det.x1, det.y1, det.x2, det.y2)
+            # Pose bodies that sit mostly inside this tracker box.
+            contained = [p for p in pose_boxes
+                         if self._containment(p, tbox) >= self.min_containment]
+            contained = self._dedup_boxes(contained)   # drop double-detections
+
+            if len(contained) >= 2:
+                print(f"[detector] ensemble: track {det.track_id} contains "
+                      f"{len(contained)} people -> splitting")
+                for i, pbox in enumerate(contained):
+                    out.append(Detection(
+                        x1=int(round(pbox[0])), y1=int(round(pbox[1])),
+                        x2=int(round(pbox[2])), y2=int(round(pbox[3])),
+                        confidence=det.confidence, class_id=det.class_id,
+                        track_id=self._split_track_id(det.track_id, i),
+                    ))
+            else:
+                out.append(det)
+        return out
+
+    def _pose_bodies(self, frame):
+        """Run the pose model; return one (x1,y1,x2,y2) body box per person."""
+        results = self.pose_model(frame, conf=self.pose_conf, iou=0.65,
+                                  verbose=False)
+        boxes = []
+        if results and results[0].boxes is not None:
+            for box in results[0].boxes:
+                boxes.append(tuple(box.xyxy[0].tolist()))
+        return boxes
+
+    @staticmethod
+    def _containment(inner, outer):
+        """Fraction of `inner` box's area that lies inside `outer`."""
+        ix1 = max(inner[0], outer[0])
+        iy1 = max(inner[1], outer[1])
+        ix2 = min(inner[2], outer[2])
+        iy2 = min(inner[3], outer[3])
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        inner_area = max(1.0, (inner[2] - inner[0]) * (inner[3] - inner[1]))
+        return inter / inner_area
+
+    def _dedup_boxes(self, boxes, iou_thresh=0.7):
+        """Collapse near-duplicate boxes (the pose model detecting one person twice)."""
+        kept = []
+        for b in boxes:
+            if all(self._iou(b, k) < iou_thresh for k in kept):
+                kept.append(b)
+        return kept
+
+    @staticmethod
+    def _iou(a, b):
+        ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
+        ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+        area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+        return inter / (area_a + area_b - inter)
+
+    @staticmethod
+    def _split_track_id(track_id, i):
+        """
+        Primary person in a split keeps the real track_id; extras get a derived
+        id. These derived ids are per-frame (the pose split is recomputed each
+        frame), so downstream they read as short tracks -- the ReID noise filter
+        and reconciler are what stitch/clean them.
+        """
+        if track_id is None:
+            return None
+        return track_id if i == 0 else track_id + 100000 * (i + 1)

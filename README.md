@@ -203,13 +203,33 @@ See [ARCHITECTURE.md §7](ARCHITECTURE.md) for what every knob does.
 With the venv active and Qdrant running:
 
 ```bash
-python main.py
+python main.py                       # uses the videos in config.yaml (the samples)
 ```
 
-Start from a clean gallery (wipes the store first):
+### Run on your OWN videos (dynamic input — no config edits)
+
+Point the pipeline at any videos from the command line; this **overrides**
+`config.yaml`, so you never have to hardcode paths:
 
 ```bash
-python main.py --reset
+# one or more explicit files (camera name = the file's base name):
+python main.py --videos /path/cam_a.mp4 /path/cam_b.mp4
+
+# every video in a folder (.mp4/.avi/.mov/.mkv/...):
+python main.py --videos-dir /path/to/footage
+
+# live RTSP / HTTP streams work too:
+python main.py --videos rtsp://host/stream1 rtsp://host/stream2
+```
+
+Precedence: `--videos` > `--videos-dir` > `config.yaml source.videos`. Missing
+files fail fast with a clear message; duplicate names are made unique
+automatically.
+
+Start from a clean gallery (wipes the store first) — combine with any input:
+
+```bash
+python main.py --reset --videos-dir /path/to/footage
 ```
 
 Headless (`display.show_window: false`) runs to completion and prints a summary.
