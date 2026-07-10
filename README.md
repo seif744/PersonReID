@@ -218,8 +218,6 @@ python main.py --videos /path/cam_a.mp4 /path/cam_b.mp4
 # every video in a folder (.mp4/.avi/.mov/.mkv/...):
 python main.py --videos-dir /path/to/footage
 
-# live RTSP / HTTP streams work too:
-python main.py --videos rtsp://host/stream1 rtsp://host/stream2
 ```
 
 Precedence: `--videos` > `--videos-dir` > `config.yaml source.videos`. Missing
