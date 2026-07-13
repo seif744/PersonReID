@@ -40,7 +40,7 @@ class CropSaver:
 
     def __init__(self, output_dir="crops", interval=10, padding=0):
         # Folder to write everything under, e.g. "crops".
-        self.output_dir = output_dir
+        #self.output_dir = output_dir
 
         # Save a crop for a given track only once every `interval` frames.
         # interval=1 saves every frame; interval=10 saves ~one every 10 frames.
@@ -55,7 +55,7 @@ class CropSaver:
         self._last_saved = {}
 
         # Make the top-level folder now (exist_ok = don't error if it's there).
-        os.makedirs(self.output_dir, exist_ok=True)
+        # os.makedirs(self.output_dir, exist_ok=True)
 
     def save(self, frame, detections, frame_index):
         """
@@ -69,7 +69,8 @@ class CropSaver:
         `frame_index` is the running frame counter (0, 1, 2, ...).
         Returns how many crops were written this call (handy for logging).
         """
-        saved_count = 0
+        #saved_count = 0
+        extracted_crops=[]
 
         for det in detections:
             # No ID yet -> we can't file it under a person folder. Skip.
@@ -88,18 +89,23 @@ class CropSaver:
 
             # Build the per-person folder path, e.g. "crops/id_0003".
             # :04d zero-pads the id to 4 digits so folders sort nicely.
-            person_dir = os.path.join(self.output_dir, f"id_{det.track_id:04d}")
-            os.makedirs(person_dir, exist_ok=True)
+            #person_dir = os.path.join(self.output_dir, f"id_{det.track_id:04d}")
+            #os.makedirs(person_dir, exist_ok=True)
 
             # File name includes the frame number so crops are ordered in time.
-            filename = f"f{frame_index:06d}.jpg"
-            path = os.path.join(person_dir, filename)
+            #filename = f"f{frame_index:06d}.jpg"
+            #path = os.path.join(person_dir, filename)
 
             # Write the image to disk.
-            cv2.imwrite(path, crop)
+            #cv2.imwrite(path, crop)
 
             # Record that we saved this person on this frame.
+            #self._last_saved[det.track_id] = frame_index
+            #saved_count += 1
+            extracted_crops.append({
+                "track_id": det.track_id,
+                "crop": crop
+            })
             self._last_saved[det.track_id] = frame_index
-            saved_count += 1
 
-        return saved_count
+        return extracted_crops

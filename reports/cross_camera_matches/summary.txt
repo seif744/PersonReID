@@ -1,8 +1,0 @@
-Cross-camera matches
-====================
-run_id: 20260709_105715
-
-GID 1: cam_219, cam_224; 98 observations; frames 0-778
-contact sheet: reports/cross_camera_matches/gid_0001.jpg
-cam_219: track 0001 frames 0-120 (13 obs) -> crops/cam_219/id_0001; track 0024 frames 393-778 (39 obs) -> crops/cam_219/id_0024
-cam_224: track 0006 frames 0-451 (46 obs) -> crops/cam_224/id_0006

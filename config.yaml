@@ -3,7 +3,10 @@
 # =============================================================================
 
 source:
-  # One entry per camera. Each gets its own detector/tracker and crops folder.
+  # Default videos (one entry per camera; each gets its own detector/tracker and
+  # crops folder). These are just the DEFAULTS -- override them at runtime with
+  #   python main.py --videos a.mp4 b.mp4        (or)   --videos-dir /path
+  # so you never have to edit this file to process different footage.
   videos:
     - name: cam_219
       path: vlc-record-2026-07-01-17h27m20s-rtsp___192.168.0.219_554_ch01_0-.avi
@@ -20,6 +23,15 @@ detector:
   model: yolo11n.pt          # small YOLO; auto-downloaded on first run
   confidence_threshold: 0.4  # drop boxes less confident than this
   person_class_id: 0         # COCO class 0 = person
+  # Pose ensemble: when the box tracker merges two overlapping people into ONE
+  # box (e.g. crops/id_0008), a second pose model finds one skeleton per person
+  # and we split the box into individual people. Runs a 2nd model per frame.
+  pose_ensemble:
+    enabled: true
+    pose_model: yolo11n-pose.pt   # auto-downloaded on first run
+    min_containment: 0.6          # a pose body must be >= this fraction inside a
+                                  # tracker box to count as "in it" (split needs 2+)
+    conf: 0.25                    # pose model confidence floor
 
 tracker:
   enabled: true
@@ -38,6 +50,18 @@ reid:
   device: cpu                # "cuda" if you have a GPU
   interval: 10               # re-embed a given track at most once every N frames
   ttl: 300                   # forget a track from the cache after N unseen frames
+  # Cap on how many embeddings ONE track_id contributes over its life (0 = off).
+  # A stable track's global id is ALREADY decided once and never re-matched (see
+  # identity/service.py: the (camera, track_id) -> global_id cache), so occlusion
+  # cannot flip a track's id regardless of this knob. This cap is a separate
+  # PRODUCTION lever: it stops re-embedding a settled track, saving forward passes
+  # and keeping later (occluded) frames out of the gallery -- valuable when tracks
+  # run for minutes across hundreds of cameras.
+  #   TRADE-OFF (measured on the sample clip): fewer views -> weaker per-track
+  #   prototype -> the borderline cross-camera match (cosine ~0.87 vs threshold
+  #   0.85) is LOST. So it defaults OFF; only enable it for long-track / high-
+  #   camera-count deployments, and keep it >= reconcile.min_tracklet_observations.
+  max_embeddings_per_track: 0
   quality:
     enabled: true            # reject bad crops before embedding/storing
     min_width: 24

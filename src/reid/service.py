@@ -40,7 +40,8 @@ from detector import crop_person   # shared "box -> safe crop" primitive
 
 
 class TrackEmbedder:
-    def __init__(self, extractor, interval=10, ttl=300, quality=None):
+    def __init__(self, extractor, interval=10, ttl=300, quality=None,
+                 max_embeddings_per_track=0):
         """
         extractor : a ReIDExtractor (loaded once, reused).
         interval  : recompute a track's embedding every N frames (>=1).
@@ -48,10 +49,20 @@ class TrackEmbedder:
                     many frames.
         quality   : optional crop-quality gate config. Bad crops are not
                     embedded or persisted, which keeps the gallery cleaner.
+        max_embeddings_per_track : cap on how many embeddings ONE track_id
+                    contributes over its whole life (0 = unlimited). The identity
+                    of a stable track is decided once (Identity Service caches it
+                    per track_id), so a track only needs a handful of good views
+                    for its identity + reconciliation prototype. After the cap we
+                    STOP re-embedding it: no gallery-poisoning from later
+                    (occluded / degraded) frames of the same person, and much less
+                    CPU. Must be >= identity.reconcile.min_tracklet_observations
+                    so reconciliation still has enough views to match on.
         """
         self.extractor = extractor
         self.interval = max(1, interval)
         self.ttl = ttl
+        self.max_per_track = max(0, int(max_embeddings_per_track or 0))
         quality = quality or {}
         self.quality_enabled = quality.get("enabled", False)
         self.min_crop_width = quality.get("min_width", 24)
@@ -68,7 +79,12 @@ class TrackEmbedder:
         # gallery (the id_0008 "two people in one box" case). 1.0 = disabled.
         self.max_occlusion_ratio = quality.get("max_occlusion_ratio", 1.0)
 
-        # track_id -> {"embedding": (512,) np.ndarray, "frame": int last computed}
+        # track_id -> {
+        #   "embedding": (512,) np.ndarray,  last computed vector (reused between
+        #   "frame":     int,                frames the track was last EMBEDDED
+        #   "seen":      int,                frame the track was last PRESENT
+        #   "count":     int,                embeddings contributed so far (cap)
+        # }
         self._cache = {}
 
         # How many forward-pass embeddings we actually computed on the last
@@ -102,10 +118,20 @@ class TrackEmbedder:
                 continue
 
             entry = self._cache.get(det.track_id)
+            if entry is not None:
+                entry["seen"] = frame_index               # keep the track alive
+
+            # Once a track has contributed its cap of embeddings, its identity is
+            # already settled -- stop re-embedding it (reuse the cached vector).
+            # This is what prevents later occluded frames of a stable track from
+            # entering the gallery, and saves the forward passes.
+            capped = (self.max_per_track > 0 and entry is not None
+                      and entry.get("count", 0) >= self.max_per_track)
             is_due = entry is None or (frame_index - entry["frame"]) >= self.interval
 
-            if not is_due:
-                det.embedding = entry["embedding"]        # cache hit: reuse
+            if capped or not is_due:
+                if entry is not None:
+                    det.embedding = entry["embedding"]    # cache hit: reuse
                 continue
 
             crop = crop_person(frame, det)
@@ -134,7 +160,12 @@ class TrackEmbedder:
             embeddings = self.extractor.extract_batch([c for _, c in due])
             for (det, _), emb in zip(due, embeddings):
                 det.embedding = emb
-                self._cache[det.track_id] = {"embedding": emb, "frame": frame_index}
+                prev = self._cache.get(det.track_id)
+                count = (prev.get("count", 0) if prev else 0) + 1
+                self._cache[det.track_id] = {
+                    "embedding": emb, "frame": frame_index,
+                    "seen": frame_index, "count": count,
+                }
         self.last_num_embedded = len(due)
         self.last_embedded = [det for det, _ in due]
         self.last_quality_rejected = rejected
@@ -205,8 +236,13 @@ class TrackEmbedder:
         return worst
 
     def _evict_stale(self, frame_index):
-        """Drop tracks not refreshed within `ttl` frames (they've left view)."""
+        """
+        Drop tracks not SEEN within `ttl` frames (they've left view). We evict on
+        last-seen, not last-embedded, so a capped track (no longer re-embedded but
+        still on screen) is kept alive -- otherwise it would be evicted, re-added,
+        and its embedding cap would reset.
+        """
         stale = [tid for tid, e in self._cache.items()
-                 if frame_index - e["frame"] > self.ttl]
+                 if frame_index - e.get("seen", e["frame"]) > self.ttl]
         for tid in stale:
             del self._cache[tid]

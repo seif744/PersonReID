@@ -203,13 +203,31 @@ See [ARCHITECTURE.md §7](ARCHITECTURE.md) for what every knob does.
 With the venv active and Qdrant running:
 
 ```bash
-python main.py
+python main.py                       # uses the videos in config.yaml (the samples)
 ```
 
-Start from a clean gallery (wipes the store first):
+### Run on your OWN videos (dynamic input — no config edits)
+
+Point the pipeline at any videos from the command line; this **overrides**
+`config.yaml`, so you never have to hardcode paths:
 
 ```bash
-python main.py --reset
+# one or more explicit files (camera name = the file's base name):
+python main.py --videos /path/cam_a.mp4 /path/cam_b.mp4
+
+# every video in a folder (.mp4/.avi/.mov/.mkv/...):
+python main.py --videos-dir /path/to/footage
+
+```
+
+Precedence: `--videos` > `--videos-dir` > `config.yaml source.videos`. Missing
+files fail fast with a clear message; duplicate names are made unique
+automatically.
+
+Start from a clean gallery (wipes the store first) — combine with any input:
+
+```bash
+python main.py --reset --videos-dir /path/to/footage
 ```
 
 Headless (`display.show_window: false`) runs to completion and prints a summary.
@@ -224,7 +242,7 @@ A run produces:
 | Artifact | Location | What it is |
 |---|---|---|
 | Per-person crops | `crops/<camera>/id_<track>/` | sampled crops per track (debug + future training data) |
-| Annotated videos | `output_<camera>.mp4` | source video with boxes + IDs drawn |
+| Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
 | Cross-camera report | `reports/cross_camera_matches/summary.txt` | which global IDs appeared in >1 camera |
 | Contact sheets | `reports/cross_camera_matches/gid_*.jpg` | side-by-side crops per cross-camera person |
@@ -238,6 +256,14 @@ Cross-camera people: 1
 - **distinct people** = number of global IDs after reconciliation.
 - **Cross-camera people** = global IDs seen in more than one camera (the product's
   core result).
+
+The annotated `output_<camera>.mp4` videos are drawn in a **second pass that runs
+after cross-camera reconciliation**, so the labels use the *final* global IDs.
+This means a person who walks from one camera into another shows the **same
+`GID n`** (and the same box colour) in **both** videos — the visual proof the
+cameras are linked. Each box is labelled `GID n  IDk` (`n` = cross-camera global
+ID, `k` = that camera's local track ID). In the run above, `cam_219` track 1 and
+`cam_224` track 7 are the same person, so both videos label them `GID 1`.
 
 ---
 
@@ -289,3 +315,7 @@ Generated at runtime (gitignored): `crops/`, `output_*.mp4`, `reports/`,
 ---
 
 
+
+2 input -> Crop -> At that time match the crops -> at the end we get a label tracker id and bonding box list 
+remove crop saving
+output video 
