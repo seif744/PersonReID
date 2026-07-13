@@ -10,6 +10,62 @@ cameras** and **across re-appearances**. Produces annotated videos.
 
 ---
 
+## How it flows
+
+```mermaid
+flowchart TD
+    CFG(["⚙️ config.yaml / CLI"]) --> A1 & B1
+
+    subgraph LIVE["🎥 LIVE — one thread per camera, running at the same time"]
+        direction LR
+        subgraph CAM_A["Camera A"]
+            direction TB
+            A1(["Video frame"]) --> A2["Detect + Track\n(YOLO11n + ByteTrack)"]
+            A2 --> A3["Embed crop\n(OSNet, 512-d)"]
+            A3 --> A4["Assign a\nglobal ID"]
+        end
+        subgraph CAM_B["Camera B"]
+            direction TB
+            B1(["Video frame"]) --> B2["Detect + Track\n(YOLO11n + ByteTrack)"]
+            B2 --> B3["Embed crop\n(OSNet, 512-d)"]
+            B3 --> B4["Assign a\nglobal ID"]
+        end
+    end
+
+    A4 --> QD
+    B4 --> QD
+
+    QD[("🗄️ Qdrant\nshared gallery\n(all cameras write here)")]
+
+    QD --> RECON
+
+    subgraph FINAL["🏁 OFFLINE — runs ONCE, after every camera finishes"]
+        direction TB
+        RECON["Reconcile tracklets\nlink the same person\nacross cameras"]
+        RECON --> RENDER["Re-render videos\nusing the FINAL\nglobal ids"]
+        RECON --> SUMMARY["Print run summary\n(console only)"]
+    end
+
+    RENDER --> OUT[("🎬 output_camA.mp4\n🎬 output_camB.mp4\nsame person = same GID\nin BOTH videos")]
+
+    style CFG fill:#e8eef7,stroke:#4a6fa5,color:#1a1a1a
+    style QD fill:#fdf3d7,stroke:#b8860b,color:#1a1a1a,stroke-width:2px
+    style OUT fill:#e3f5e6,stroke:#2e7d32,color:#1a1a1a,stroke-width:2px
+    style LIVE fill:#f7f9fc,stroke:#4a6fa5
+    style FINAL fill:#f2f8f3,stroke:#2e7d32
+    style CAM_A fill:#ffffff,stroke:#9fb3cf
+    style CAM_B fill:#ffffff,stroke:#9fb3cf
+```
+
+Each camera runs the **top** section live, on its own thread, all writing into
+one shared Qdrant gallery. Only after **every** camera finishes does the
+**bottom** section run — once: it links the same person across cameras, then
+re-renders the annotated videos with those final IDs, so one person carries the
+same `GID n` in every camera's output. Full per-stage detail:
+**[ARCHITECTURE.md §2](ARCHITECTURE.md)**.
+
+---
+
 ## Table of contents
 1. [Prerequisites](#1-prerequisites)
 2. [Install the Python environment](#2-install-the-python-environment)
