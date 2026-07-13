@@ -803,6 +803,7 @@ def main():
                 interval=reid_cfg.get("interval", 10),
                 ttl=reid_cfg.get("ttl", 300),
                 quality=reid_cfg.get("quality"),
+                max_embeddings_per_track=reid_cfg.get("max_embeddings_per_track", 0),
             )
         print("[main] ReID enabled -> embedding tracked people (no ids assigned).")
 

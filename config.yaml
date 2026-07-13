@@ -50,6 +50,18 @@ reid:
   device: cpu                # "cuda" if you have a GPU
   interval: 10               # re-embed a given track at most once every N frames
   ttl: 300                   # forget a track from the cache after N unseen frames
+  # Cap on how many embeddings ONE track_id contributes over its life (0 = off).
+  # A stable track's global id is ALREADY decided once and never re-matched (see
+  # identity/service.py: the (camera, track_id) -> global_id cache), so occlusion
+  # cannot flip a track's id regardless of this knob. This cap is a separate
+  # PRODUCTION lever: it stops re-embedding a settled track, saving forward passes
+  # and keeping later (occluded) frames out of the gallery -- valuable when tracks
+  # run for minutes across hundreds of cameras.
+  #   TRADE-OFF (measured on the sample clip): fewer views -> weaker per-track
+  #   prototype -> the borderline cross-camera match (cosine ~0.87 vs threshold
+  #   0.85) is LOST. So it defaults OFF; only enable it for long-track / high-
+  #   camera-count deployments, and keep it >= reconcile.min_tracklet_observations.
+  max_embeddings_per_track: 0
   quality:
     enabled: true            # reject bad crops before embedding/storing
     min_width: 24
