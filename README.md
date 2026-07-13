@@ -140,10 +140,11 @@ Note: embedded mode locks the folder to one process and is dev-only.
 
 ## 5. Configure your run
 
-> **Runs out of the box:** the repo ships with two sample videos and the default
-> `config.yaml` already points at them. With Qdrant running (section 4),
-> `python main.py` works with no config changes. Edit `source.videos` below to
-> process your own footage.
+> **You must provide your own video files.** Sample footage is **not** shipped in
+> the repo (videos are gitignored). Either drop your files in and point
+> `source.videos` in `config.yaml` at them, or pass them on the command line with
+> `--videos` / `--videos-dir` (see section 6). The default `config.yaml` lists two
+> example filenames purely as a template — edit them to your paths.
 
 Edit [config.yaml](config.yaml). The key sections:
 
@@ -199,7 +200,7 @@ See [ARCHITECTURE.md §7](ARCHITECTURE.md) for what every knob does.
 With the venv active and Qdrant running:
 
 ```bash
-python main.py                       # uses the videos in config.yaml (the samples)
+python main.py                       # uses the videos listed in config.yaml
 ```
 
 ### Run on your OWN videos (dynamic input — no config edits)
@@ -237,11 +238,12 @@ A run produces:
 
 | Artifact | Location | What it is |
 |---|---|---|
-
 | Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
 
-
+That's it — no crop images and no report files are written. (Per-person crop
+images can be turned back on with `crops.save: true` in `config.yaml`, e.g. to
+collect ReID training data, but they are **off by default**.)
 
 The console prints a **RUN SUMMARY** at the end, e.g.:
 ```
@@ -252,14 +254,6 @@ Cross-camera people: 1
 - **distinct people** = number of global IDs after reconciliation.
 - **Cross-camera people** = global IDs seen in more than one camera (the product's
   core result).
-
-The annotated `output_<camera>.mp4` videos are drawn in a **second pass that runs
-after cross-camera reconciliation**, so the labels use the *final* global IDs.
-This means a person who walks from one camera into another shows the **same
-`GID n`** (and the same box colour) in **both** videos — the visual proof the
-cameras are linked. Each box is labelled `GID n  IDk` (`n` = cross-camera global
-ID, `k` = that camera's local track ID). In the run above, `cam_219` track 1 and
-`cam_224` track 7 are the same person, so both videos label them `GID 1`.
 
 ---
 
@@ -288,7 +282,7 @@ ARCHITECTURE.md             deep-dive: data flow, components, design
 src/
   video_source.py           frame decoding
   detector.py               YOLO11 + ByteTrack, Detection, crop_person
-  crop_saver.py             per-track crop persistence
+  crop_saver.py             per-track crop persistence (only when crops.save: true)
   drawing.py                boxes / HUD overlay
   reid/
     extractor.py            crop -> 512-d L2-normalized embedding (OSNet)
