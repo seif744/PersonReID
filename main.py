@@ -423,6 +423,92 @@ def clear_directory(path):
         os.makedirs(path, exist_ok=True)
 
 
+def build_gid_map(store, run_id):
+    """
+    Read the store (AFTER reconciliation) and return the FINAL global id for each
+    camera-local track: {(camera, track_id): global_id}. One track should carry a
+    single global id, but we take the most common as a safety net. This is what
+    lets the re-render label the same person with the same GID in every camera.
+    """
+    from collections import defaultdict, Counter
+    if store is None:
+        return {}
+    votes = defaultdict(Counter)
+    offset = None
+    while True:
+        pts, offset = store.client.scroll(
+            store.collection, limit=1000, offset=offset,
+            with_payload=True, with_vectors=False)
+        for p in pts:
+            pl = p.payload or {}
+            if run_id is not None and pl.get("run_id") != run_id:
+                continue
+            gid = pl.get("global_id")
+            if gid is None:
+                continue
+            votes[(pl.get("camera"), pl.get("track_id"))][gid] += 1
+        if offset is None:
+            break
+    return {key: counter.most_common(1)[0][0] for key, counter in votes.items()}
+
+
+def render_final_videos(jobs, cfg, shared, store, run_id):
+    """
+    SECOND PASS -- write output_<camera>.mp4 with the FINAL (post-reconciliation)
+    global ids. The live pass only captured box geometry; cross-camera identity is
+    settled afterwards by reconcile.py. Re-drawing here means a person who walked
+    from cam A to cam B carries the SAME "GID n" (and the same colour) in BOTH
+    output videos -- the core proof the pipeline works. We re-decode the source
+    frames (cheap; no model) and draw the captured boxes, so boxes/track ids match
+    the live pass exactly.
+    """
+    from types import SimpleNamespace
+    gid_map = build_gid_map(store, run_id)
+    resize_width = cfg["source"].get("resize_width", 0)
+    fps = float(cfg["display"].get("output_fps", 20.0))
+
+    for name, path, *_ in jobs:
+        annos = shared["annotations"].get(name)
+        if not annos:
+            continue
+        out_path = f"output_{name}.mp4"
+        writer = None
+        try:
+            with VideoSource(path=path) as cam:
+                for frame_index, frame in enumerate(cam.frames()):
+                    if frame_index >= len(annos):
+                        break  # only re-render the frames the live pass processed
+                    if resize_width and frame.shape[1] > resize_width:
+                        scale = resize_width / frame.shape[1]
+                        frame = cv2.resize(
+                            frame,
+                            (resize_width, int(round(frame.shape[0] * scale))),
+                            interpolation=cv2.INTER_AREA)
+
+                    dets = [
+                        SimpleNamespace(
+                            x1=x1, y1=y1, x2=x2, y2=y2,
+                            track_id=track_id, confidence=conf,
+                            global_id=gid_map.get((name, track_id)),
+                        )
+                        for (x1, y1, x2, y2, track_id, conf) in annos[frame_index]
+                    ]
+                    frame = draw_detections(frame, dets)
+                    frame = draw_hud(frame, person_count=len(dets))
+
+                    if writer is None:
+                        h, w = frame.shape[:2]
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+                    writer.write(frame)
+        except Exception as e:
+            print(f"[render] {name}: ERROR re-rendering: {e}")
+        finally:
+            if writer is not None:
+                writer.release()
+                print(f"[render] Final annotated video -> {out_path}")
+
+
 # =============================================================================
 # The WORKER: runs the whole pipeline for ONE video, on its own thread.
 # It does NOT touch any window. It only:
@@ -431,9 +517,7 @@ def clear_directory(path):
 # =============================================================================
 def process_video(name, path, detector, crop_saver, embedder, store, identity,
                   locks, cfg, shared, stop_event, run_id):
-    disp_cfg = cfg["display"]
     trk_cfg = cfg["tracker"]
-    save_annotated = disp_cfg.get("save_annotated", False)
     # 0 = process the whole video; a positive number stops early (handy for a
     # quick CPU test without waiting for hundreds of frames).
     max_frames = cfg["source"].get("max_frames", 0)
@@ -445,9 +529,13 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
     resize_width = cfg["source"].get("resize_width", 0)
 
     tag = f"[{name}]"
-    writer = None
     frame_index = 0
     stored_here = 0   # how many embeddings THIS camera has written to the store
+    # Per-frame box geometry captured for the FINAL re-render pass. We record the
+    # boxes + track ids (NOT the pixels) as we go, so after cross-camera
+    # reconciliation we can re-draw the video with the final global ids without
+    # re-running detection. annotations[f] = [(x1,y1,x2,y2,track_id,conf), ...].
+    annotations = []
 
     try:
         with VideoSource(path=path) as cam:
@@ -514,19 +602,19 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                             store.add_many([d.embedding for d in fresh], payloads)
                         stored_here += len(fresh)
 
+                # ---- Record box geometry for the final re-render pass --------
+                # Captured BEFORE drawing (clean coords). The annotated video is
+                # NOT written here: it is written in a second pass after
+                # reconciliation so its labels use the FINAL global ids (so the
+                # same person carries the same GID across both cameras' videos).
+                annotations.append([
+                    (d.x1, d.y1, d.x2, d.y2, d.track_id, d.confidence)
+                    for d in detections
+                ])
+
                 # ---- STAGE 5: draw (modifies frame in place) ----------------
                 frame = draw_detections(frame, detections)
                 frame = draw_hud(frame, person_count=len(detections))
-
-                # ---- Save an annotated output video, if requested -----------
-                if save_annotated:
-                    if writer is None:
-                        h, w = frame.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        out_path = f"output_{name}.mp4"
-                        writer = cv2.VideoWriter(out_path, fourcc, 20.0, (w, h))
-                        print(f"{tag} Writing annotated video -> {out_path}")
-                    writer.write(frame)
 
                 # ---- Publish latest frame for the main thread to display -----
                 # We store a COPY so the main thread can read it while we move
@@ -552,10 +640,10 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
         # One video failing shouldn't kill the others -- log and move on.
         print(f"{tag} ERROR: {e}")
     finally:
-        if writer is not None:
-            writer.release()
-        # Mark this camera as finished so the main thread knows.
+        # Hand the captured geometry to the main thread for the re-render pass,
+        # and mark this camera as finished.
         with shared["lock"]:
+            shared["annotations"][name] = annotations
             shared["done"].add(name)
         print(f"{tag} Done. Processed {frame_index} frames.")
 
@@ -755,6 +843,7 @@ def main():
         "lock": threading.Lock(),
         "frames": {},
         "done": set(),
+        "annotations": {},   # {name: [per-frame box geometry]} for the re-render
     }
     stop_event = threading.Event()  # set to True to ask all workers to stop
 
@@ -806,6 +895,13 @@ def main():
             require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
             min_tracklet_observations=recon_cfg.get("min_tracklet_observations", 1),
         )
+
+    # ---- Final render: annotated videos with the reconciled global ids ------
+    # Done AFTER reconciliation so the same person carries the same GID (and
+    # colour) across every camera's output video.
+    if disp_cfg.get("save_annotated"):
+        print("[main] Rendering annotated videos with final global ids...")
+        render_final_videos(jobs, cfg, shared, store, run_id)
 
     print_run_summary(store, jobs, cfg, run_id=run_id)
     print("[main] All done.")

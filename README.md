@@ -242,7 +242,7 @@ A run produces:
 | Artifact | Location | What it is |
 |---|---|---|
 | Per-person crops | `crops/<camera>/id_<track>/` | sampled crops per track (debug + future training data) |
-| Annotated videos | `output_<camera>.mp4` | source video with boxes + IDs drawn |
+| Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
 | Cross-camera report | `reports/cross_camera_matches/summary.txt` | which global IDs appeared in >1 camera |
 | Contact sheets | `reports/cross_camera_matches/gid_*.jpg` | side-by-side crops per cross-camera person |
@@ -256,6 +256,14 @@ Cross-camera people: 1
 - **distinct people** = number of global IDs after reconciliation.
 - **Cross-camera people** = global IDs seen in more than one camera (the product's
   core result).
+
+The annotated `output_<camera>.mp4` videos are drawn in a **second pass that runs
+after cross-camera reconciliation**, so the labels use the *final* global IDs.
+This means a person who walks from one camera into another shows the **same
+`GID n`** (and the same box colour) in **both** videos — the visual proof the
+cameras are linked. Each box is labelled `GID n  IDk` (`n` = cross-camera global
+ID, `k` = that camera's local track ID). In the run above, `cam_219` track 1 and
+`cam_224` track 7 are the same person, so both videos label them `GID 1`.
 
 ---
 
