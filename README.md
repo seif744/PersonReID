@@ -241,11 +241,9 @@ A run produces:
 
 | Artifact | Location | What it is |
 |---|---|---|
-| Per-person crops | `crops/<camera>/id_<track>/` | sampled crops per track (debug + future training data) |
 | Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
-| Cross-camera report | `reports/cross_camera_matches/summary.txt` | which global IDs appeared in >1 camera |
-| Contact sheets | `reports/cross_camera_matches/gid_*.jpg` | side-by-side crops per cross-camera person |
+
 
 The console prints a **RUN SUMMARY** at the end, e.g.:
 ```
