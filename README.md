@@ -309,6 +309,3 @@ Generated at runtime (gitignored): `crops/`, `output_*.mp4`, `reports/`,
 `qdrant_storage/`, `qdrant_data/`.
 
 ---
-
-
-
