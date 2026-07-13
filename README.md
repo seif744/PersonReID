@@ -2,8 +2,7 @@
 
 Detect and track people across multiple camera videos, embed their appearance,
 and assign a **global ID** that stays the same for one real person **across
-cameras** and **across re-appearances**. Produces annotated videos, per-person
-crops, and a cross-camera match report.
+cameras** and **across re-appearances**. Produces annotated videos.
 
 > **How it works internally:** see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
 > full data flow, every component, the concurrency model, and design rationale.
@@ -166,9 +165,6 @@ tracker:
   enabled: true
   config: bytetrack.yaml
 
-crops:
-  save: true
-  interval: 10                   # save a crop every N frames per track
 
 reid:
   enabled: true
@@ -241,8 +237,10 @@ A run produces:
 
 | Artifact | Location | What it is |
 |---|---|---|
+
 | Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
+
 
 
 The console prints a **RUN SUMMARY** at the end, e.g.:
@@ -311,9 +309,3 @@ Generated at runtime (gitignored): `crops/`, `output_*.mp4`, `reports/`,
 `qdrant_storage/`, `qdrant_data/`.
 
 ---
-
-
-
-2 input -> Crop -> At that time match the crops -> at the end we get a label tracker id and bonding box list 
-remove crop saving
-output video 
