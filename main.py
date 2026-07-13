@@ -71,7 +71,7 @@ def _put_label(img, text, x, y, scale=0.5, thickness=1):
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale,
                 (20, 20, 20), thickness, cv2.LINE_AA)
 
-
+'''
 def _make_cross_camera_contact_sheet(gid, gid_info, crop_dir, report_dir,
                                      thumbs_per_track=6):
     """
@@ -136,7 +136,7 @@ def _make_cross_camera_contact_sheet(gid, gid_info, crop_dir, report_dir,
     cv2.imwrite(out_path, sheet)
     return out_path
 
-
+'''
 def load_dotenv(path=".env"):
     """
     Minimal .env loader (no python-dotenv dependency). Reads KEY=VALUE lines from
@@ -161,7 +161,7 @@ def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-
+'''
 def print_run_summary(store, jobs, cfg, run_id=None):
     """
     Print WHAT the run produced, so a headless run isn't a black box. Reads the
@@ -317,7 +317,7 @@ def print_run_summary(store, jobs, cfg, run_id=None):
             print(f"  Annotated videos: {', '.join(vids)}")
     print("=======================\n")
 
-
+'''
 def get_screen_size():
     """
     Return the monitor's (width, height) in pixels so we can fit windows on
