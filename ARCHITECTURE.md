@@ -3,8 +3,9 @@
 Multi-camera person re-identification (ReID) over recorded CCTV. Given one video
 per camera, the system detects and tracks people, embeds their appearance, and
 assigns a **global ID** that is stable for the same real person **across cameras**
-and **across re-appearances** within a camera. Outputs: annotated videos, saved
-crops, and a cross-camera report.
+and **across re-appearances** within a camera. Output: annotated videos (boxes +
+global-ID labels) and a console run-summary. Per-person crop images are optional
+(`crops.save`, off by default).
 
 ---
 
@@ -40,19 +41,22 @@ isolated and the code maintainable.
    │ 1. VideoSource          video file      → frame              │
    │ 2. (optional) resize    frame            → frame (downscaled) │
    │ 3. PersonDetector       frame            → [Detection + track_id]  (YOLO11n + ByteTrack)
-   │ 4. CropSaver            frame+dets       → crops/<cam>/id_<t>/f<frame>.jpg
+   │ 4. CropSaver (optional)  frame+dets      → crops/<cam>/id_<t>/  (only if crops.save)
    │ 5. TrackEmbedder        crop             → det.embedding (512-d)  [shared model lock]
    │      └─ quality gate + occlusion gate + throttle/cache          │
    │ 6. IdentityService      embedding+where+when → det.global_id   [identity lock]
    │      └─ also COMMITS the observation to the vector store        │
-   │ 7. drawing + VideoWriter → output_<cam>.mp4                     │
+   │ 7. drawing → live display window; box geometry captured for the │
+   │      final render (the video is NOT written in this pass)       │
    └─────────────────────────────────────────────────────────────┘
                             │  (all camera threads join)
                             ▼
    ┌─────────────────────────────────────────────────────────────┐
    │ 8. reconcile_tracklets  OFFLINE, whole-gallery view:           │
    │      rebuild identities from tracklets, merge across cameras   │
-   │ 9. print_run_summary    → reports/cross_camera_matches/        │
+   │ 9. render_final_videos  re-draw with FINAL global ids →         │
+   │      output_<cam>.mp4  (same person = same GID in every video)  │
+   │ 10. print_run_summary   → console only (no files written)      │
    └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,9 +73,11 @@ Returns `Detection(x1,y1,x2,y2, confidence, class_id, track_id, ...)`. `track_id
 is **per-camera** and stable frame-to-frame; it may be `None` until ByteTrack
 confirms a box. `crop_person()` is the shared "box → safe crop" primitive.
 
-### CropSaver — `src/crop_saver.py`
-Writes one crop per tracked person every `crops.interval` (10) frames, from the
-**clean** frame (before boxes are drawn), to `crops/<camera>/id_<track>/`.
+### CropSaver — `src/crop_saver.py` (optional, off by default)
+Only active when `crops.save: true`. Writes one crop per tracked person every
+`crops.interval` (10) frames, from the **clean** frame (before boxes are drawn),
+to `crops/<camera>/id_<track>/`. Not required by the pipeline — the embedder
+crops in-memory — it's for debugging / collecting ReID training data.
 
 ### ReIDExtractor — `src/reid/extractor.py`
 OSNet-x1_0, loaded once and shared. Pipeline per crop: BGR→RGB → resize
@@ -140,10 +146,16 @@ identities from scratch (does **not** trust live `global_id`s); the **tracklet**
 7. **Survivor**: each final cluster keeps the smallest existing global ID
    (deterministic); all its points rewritten via `set_global_id`.
 
+### render_final_videos — `main.py`
+Second render pass, after reconciliation. The live pass only captured per-frame
+box geometry; this maps each `(camera, track_id)` to its FINAL global ID
+(`build_gid_map`, read back from the store) and re-draws the source frames so the
+same person carries the **same GID and colour in every camera's `output_<cam>.mp4`**.
+
 ### print_run_summary — `main.py`
 Scrolls the store for this `run_id`; counts observations per camera and distinct
-global IDs; flags IDs seen in >1 camera as cross-camera; writes
-`reports/cross_camera_matches/summary.txt` + per-ID contact sheets.
+global IDs; flags IDs seen in >1 camera as cross-camera. **Console output only —
+writes no files.**
 
 ---
 

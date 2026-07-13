@@ -38,9 +38,12 @@ tracker:
   config: bytetrack.yaml     # ships with ultralytics; "botsort.yaml" also works
 
 crops:
-  save: true                 # write per-person crops to disk (debug + ReID data)
+  # OFF by default: embeddings are sent straight to the vector store, no crop
+  # files are written. Flip to true only if you want the per-person crop images
+  # on disk for debugging or as ReID training data.
+  save: false
   dir: crops
-  interval: 10               # save a crop for a track once every N frames
+  interval: 10               # (only used when save: true) save a crop every N frames
   padding: 0
 
 reid:
