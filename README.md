@@ -246,7 +246,6 @@ That's it — no crop images and no report files are written. (Per-person crop
 images can be turned back on with `crops.save: true` in `config.yaml`, e.g. to
 collect ReID training data, but they are **off by default**.)
 
-
 The console prints a **RUN SUMMARY** at the end, e.g.:
 ```
 Store: 516 observations -> 11 distinct people (global_ids)
