@@ -238,6 +238,7 @@ A run produces:
 
 | Artifact | Location | What it is |
 |---|---|---|
+
 | Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Vector store | Qdrant (`qdrant_storage/` or `qdrant_data/`) | every embedding + metadata |
 
