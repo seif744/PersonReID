@@ -447,12 +447,12 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                 if crop_saver is not None:
                     crop_saver.save(frame, detections, frame_index)
 
-                # ---- STAGE 5/6: embed tracked people + check Registry Qdrant ----
+                # ---- STAGE 5/6: embed tracked people + check Qdrant ---------
                 # Uses the CLEAN frame (before boxes are drawn). We embed each
-                # track (throttled + cached by TrackEmbedder) and then either
-                # look it up in registry_gallery (read-only) or fall back to
-                # the legacy identity/store path when registry lookup is
-                # disabled.
+                # track (throttled + cached by TrackEmbedder) and then either:
+                #   * look it up in registry_gallery (read-only), or
+                #   * fall back to the legacy identity/store path when registry
+                #     lookup is disabled.
                 if embedder is not None:
                     with locks["model"]:            # shared model: one at a time
                         embedder.process(frame, detections, frame_index)
@@ -729,9 +729,8 @@ def main():
     registry_cfg = cfg.get("registry", {})
     if registry_cfg.get("enabled"):
         from database.store import PersonVectorStore
-        # Read-only registry lookup against the existing Qdrant server. The
-        # wrapper is told not to create collections, so inference does not
-        # write to Qdrant.
+        # Read-only registry lookup against the local Qdrant server. The wrapper
+        # is told not to create collections so this run does not write anything.
         url = (
             os.environ.get("QDRANT_URL")
             or registry_cfg.get("url")

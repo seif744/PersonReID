@@ -1,11 +1,11 @@
 # Architecture
 
-Multi-camera person inference over recorded CCTV. Given one video per camera,
-the system detects and tracks people, embeds their appearance, checks those
-embeddings against the existing Registry-managed Qdrant gallery, and draws the
-best matching name / employee id when a confident match exists. It does **not**
-write inference embeddings to Qdrant. Output: annotated videos and a console
-run-summary. Per-person crop images are optional (`crops.save`, off by default).
+Multi-camera person re-identification (ReID) over recorded CCTV. Given one video
+per camera, the system detects and tracks people, embeds their appearance, and
+assigns a **global ID** that is stable for the same real person **across cameras**
+and **across re-appearances** within a camera. Output: annotated videos (boxes +
+global-ID labels) and a console run-summary. Per-person crop images are optional
+(`crops.save`, off by default).
 
 ---
 
@@ -45,18 +45,18 @@ and prevents inference from mutating shared gallery state.
    │ 4. CropSaver (optional)  frame+dets      → crops/<cam>/id_<t>/  (only if crops.save)
    │ 5. TrackEmbedder        crop             → det.embedding (512-d)  [shared model lock]
    │      └─ quality gate + occlusion gate + throttle/cache          │
-   │ 6. Registry lookup      embedding       → registry_label        [read-only]
-   │      └─ matches against existing registry_gallery in Qdrant     │
+   │ 6. IdentityService      embedding+where+when → det.global_id   [identity lock]
+   │      └─ also COMMITS the observation to the vector store        │
    │ 7. drawing → live display window; box geometry captured for the │
    │      final render (the video is NOT written in this pass)       │
    └─────────────────────────────────────────────────────────────┘
                             │  (all camera threads join)
                             ▼
    ┌─────────────────────────────────────────────────────────────┐
-   │ 8. Optional legacy reconcile_tracklets  OFFLINE, whole-gallery  │
-   │      view: rebuild identities from tracklets, merge across cams │
-   │ 9. render_final_videos  re-draw captured geometry + labels to    │
-   │      output_<cam>.mp4  (same person = same GID when enabled)     │
+   │ 8. reconcile_tracklets  OFFLINE, whole-gallery view:           │
+   │      rebuild identities from tracklets, merge across cameras   │
+   │ 9. render_final_videos  re-draw with FINAL global ids →         │
+   │      output_<cam>.mp4  (same person = same GID in every video)  │
    │ 10. print_run_summary   → console only (no files written)      │
    └─────────────────────────────────────────────────────────────┘
 ```
@@ -148,17 +148,15 @@ identities from scratch (does **not** trust live `global_id`s); the **tracklet**
    (deterministic); all its points rewritten via `set_global_id`.
 
 ### render_final_videos — `main.py`
-Second render pass. The live pass only captured per-frame box geometry and the
-latest registry label fields; this re-draws the source frames so annotated output
-is written once after all cameras finish. If the legacy identity path is
-enabled, it also resolves each `(camera, track_id)` to its final global ID via
-`build_gid_map`, so the same person carries the **same GID and colour in every
-camera's `output_<cam>.mp4`**.
+Second render pass, after reconciliation. The live pass only captured per-frame
+box geometry; this maps each `(camera, track_id)` to its FINAL global ID
+(`build_gid_map`, read back from the store) and re-draws the source frames so the
+same person carries the **same GID and colour in every camera's `output_<cam>.mp4`**.
 
-### Legacy print_run_summary — `main.py`
-Scrolls the legacy store for this `run_id`; counts observations per camera and
-distinct global IDs; flags IDs seen in >1 camera as cross-camera. Console output
-only, writes no files.
+### print_run_summary — `main.py`
+Scrolls the store for this `run_id`; counts observations per camera and distinct
+global IDs; flags IDs seen in >1 camera as cross-camera. **Console output only —
+writes no files.**
 
 ---
 

@@ -14,9 +14,9 @@ cameras** and **across re-appearances**. Produces annotated videos.
 
 ```mermaid
 flowchart TD
-    CFG([" config.yaml / CLI"]) --> A1 & B1
+    CFG(["⚙️ config.yaml / CLI"]) --> A1 & B1
 
-    subgraph LIVE["LIVE — one thread per camera, running at the same time"]
+    subgraph LIVE["🎥 LIVE — one thread per camera, running at the same time"]
         direction LR
         subgraph CAM_A["Camera A"]
             direction TB
@@ -35,7 +35,7 @@ flowchart TD
     A4 --> QD
     B4 --> QD
 
-    QD[("Qdrant\nregistry_gallery\nread-only lookup")]
+    QD[("Qdrant\nshared gallery\n(all cameras write here)")]
 
     QD --> RECON
 
@@ -46,7 +46,7 @@ flowchart TD
         RECON --> SUMMARY["Print run summary\n(console only)"]
     end
 
-    RENDER --> OUT[("output_camA.mp4\n output_camB.mp4\nsame person = same GID\nin BOTH videos")]
+    RENDER --> OUT[("🎬 output_camA.mp4\n🎬 output_camB.mp4\nsame person = same GID\nin BOTH videos")]
 
     style CFG fill:#e8eef7,stroke:#4a6fa5,color:#1a1a1a
     style QD fill:#fdf3d7,stroke:#b8860b,color:#1a1a1a,stroke-width:2px
@@ -312,13 +312,13 @@ A run produces:
 
 | Artifact | Location | What it is |
 |---|---|---|
+
 | Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
 | Registry gallery | Qdrant (`registry_gallery` on the shared server) | read-only lookup for names / employee ids |
 
-That's it — inference does not write embeddings to Qdrant, and no report files
-are written. (Per-person crop images can be turned back on with `crops.save:
-true` in `config.yaml`, e.g. to collect ReID training data, but they are **off
-by default**.)
+That's it — no crop images and no report files are written. (Per-person crop
+images can be turned back on with `crops.save: true` in `config.yaml`, e.g. to
+collect ReID training data, but they are **off by default**.)
 
 Registry lookups do not change the gallery contents during inference. The
 console still prints a **RUN SUMMARY** at the end for the legacy identity path,
@@ -328,10 +328,9 @@ Store: 516 observations -> 11 distinct people (global_ids)
 Cross-camera people: 1
   GID 1: cam_219 (track 0004 + 0025) + cam_224 (track 0001)
 ```
-- **distinct people** = number of global IDs after reconciliation in the legacy
-  identity pipeline.
-- **Cross-camera people** = global IDs seen in more than one camera (the
-  product's core result in legacy mode).
+- **distinct people** = number of global IDs after reconciliation.
+- **Cross-camera people** = global IDs seen in more than one camera (the product's
+  core result).
 
 ---
 
