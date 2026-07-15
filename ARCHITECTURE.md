@@ -16,13 +16,14 @@ Three layers, kept strictly independent (see `src/identity/DESIGN.md`):
 | Layer | Module | Knows about | Does NOT know about |
 |---|---|---|---|
 | **Appearance** | `reid/extractor.py` | one crop → 512-d vector | cameras, time, identity |
-| **Storage/retrieval** | `database/store.py` | vectors + metadata, nearest-neighbour | who anyone is |
-| **Identity** | `identity/service.py`, `identity/reconcile.py` | appearance + **where** + **when** | how vectors are produced |
+| **Registry lookup** | `main.py`, `database/store.py` | registry gallery + nearest-neighbour lookup | how vectors are produced, camera topology |
+| **Legacy identity** | `identity/service.py`, `identity/reconcile.py` | appearance + **where** + **when** | registry labels, current default inference path |
 
-Why: the model sees one crop with no context; the store only knows vector
-distance. Only the identity layer has the camera map and the clock, so only it
-can decide identity. This boundary is load-bearing — it keeps failure modes
-isolated and the code maintainable.
+Why: the model sees one crop with no context; the registry only knows vector
+distance plus human-curated payloads. Legacy identity logic still exists for
+older runs, but the default inference path is read-only lookup against
+`registry_gallery`, then annotation. That boundary keeps the code maintainable
+and prevents inference from mutating shared gallery state.
 
 ---
 
@@ -98,36 +99,36 @@ One per camera (cache keyed by per-camera `track_id`). `process()`:
 - Accepted crops go through **one batched forward pass**; rejected crops keep the
   track's last good vector.
 
+### Registry lookup helper — `main.py`
+After embedding a track, `registry_match_for_embedding()` searches the existing
+`registry_gallery` collection and returns a label payload when the top hit clears
+`registry.threshold`.
+- Read-only by design: it does `search()` only.
+- Uses the same 512-d cosine embeddings as the Registry service.
+- The label formatter prefers `name`, then `employee_id`, and falls back to
+  `person_id` if that is all the payload provides.
+
 ### PersonVectorStore — `src/database/store.py`
-Qdrant wrapper. Collection `persons`, dim 512, distance COSINE. Each point is
-**one observation**: UUID id, payload `{camera, track_id, frame, global_id,
-run_id, crop_quality}`.
+Qdrant wrapper. In this repo it is used in read-only mode for inference against
+`registry_gallery`; the legacy identity path can still use writable collections
+when enabled.
 - `search(embedding, k)` → k nearest by cosine.
 - `set_global_id(points, gid)` / `clear_global_id(points)` → payload rewrites
-  used by reconciliation.
-- Backend precedence `client > url > path`; config uses `url:
-  http://localhost:6333` (Docker), with `path: qdrant_data` as local fallback.
+  used by the legacy reconciliation path.
+- Backend precedence `client > url > path`; config uses `registry.url`
+  for the shared server, with `store.url` / `store.path` kept for compatibility.
 
-### IdentityService — LIVE — `src/identity/service.py`
-The `candidate → decide → commit` loop, serialized under the identity lock.
-- **Sticky per track**: decide once on a track's first observation, cache
-  `(camera, track_id) → global_id`, reuse thereafter (prevents ID flicker) while
-  still committing each new observation.
-- **`_match_or_mint`**:
-  1. `search(top_k=50)` for nearest observations.
-  2. Filter a candidate out if it's same-camera+same-frame, has no `global_id`,
-     or fails `_same_camera_overlap` (that ID already spans this frame in this
-     camera → two co-present bodies).
-  3. Score each candidate by its **bank prototype** (renormalized mean of its
-     last `bank_size`=20 embeddings); fall back to raw hit score.
-  4. **Accept** iff `best ≥ threshold (0.85)` **and** `best − second ≥
-     min_score_gap (0.03)`; else **mint** a new global ID.
-- **Commit**: store the observation under the chosen ID, update the bank and the
-  per-camera time `_spans` (used by the overlap guard).
-- **Warm start**: rebuilds banks/spans and the ID counter from the store on
-  construction (survives restarts / persistent store).
+### Legacy IdentityService — `src/identity/service.py`
+Compatibility layer for the older write-to-store pipeline. The current default
+config leaves it disabled.
+- Sticky per track: decide once on a track's first observation, cache
+  `(camera, track_id) → global_id`, reuse thereafter.
+- `_match_or_mint()` searches the gallery, filters same-camera overlaps, scores
+  candidates with a prototype bank, and either reuses an id or mints a new one.
+- `_commit()` stores the observation under the chosen id and updates the bank.
+- Warm start rebuilds banks, spans, and the id counter from the store.
 
-### reconcile_tracklets — OFFLINE — `src/identity/reconcile.py`
+### Legacy reconcile_tracklets — `src/identity/reconcile.py`
 Runs once after all cameras finish, with the full gallery visible. Rebuilds
 identities from scratch (does **not** trust live `global_id`s); the **tracklet**
 (one camera's view of one track) is the unit of evidence.
@@ -164,24 +165,25 @@ writes no files.**
 - One **worker thread per camera video**; each owns its detector (independent
   ByteTrack state), crop saver, and TrackEmbedder.
 - **Shared, lock-guarded**: the ReID model (`model` lock — one forward pass at a
-  time), the store, and the IdentityService (`identity` lock — `assign()` is
-  serialized, so it is the sole store writer and its state mutations are safe).
+  time) and the registry client (`registry` lock — shared read-only access to
+  Qdrant). If the legacy identity pipeline is enabled, its `identity` lock
+  serializes `assign()` so the old write path stays safe.
 - OpenCV windows aren't thread-safe: workers publish frames to a shared buffer;
   the main thread displays (or just joins, headless).
 
 ---
 
-## 5. Why two stages (live + offline)
+## 5. Legacy identity flow (disabled by default)
 
-The live decision is **sticky** to prevent per-frame ID flicker, but that creates
-a blind spot: a person in **two cameras at the same instant** is decided in each
-camera before the other has committed anything, so both mint separate IDs and can
-never reconcile live. `reconcile_tracklets` exists precisely to repair this with
-a whole-gallery view. Hence: live assignment **and** an offline pass.
+The write-to-store path is kept for compatibility, but the default inference flow
+does not use it. When enabled, the live decision is **sticky** to prevent
+per-frame ID flicker, but that creates a blind spot: a person in **two cameras
+at the same instant** is decided in each camera before the other has committed
+anything, so both mint separate IDs and can never reconcile live.
 
 Design bias throughout: **prefer a split over a merge.** A wrong merge fuses two
-people's histories and is unrecoverable; a split (one person given a spare ID) is
-recoverable. Thresholds are set high on purpose.
+people's histories and is unrecoverable; a split (one person given a spare ID)
+is recoverable. Thresholds are set high on purpose.
 
 ---
 
@@ -212,9 +214,14 @@ The pipeline is correct; the **embedding model is the ceiling** on this domain.
 | `crops.interval` | 10 | save a crop every N frames |
 | `reid.interval` / `ttl` | 10 / 300 | re-embed cadence / cache eviction |
 | `reid.quality.max_occlusion_ratio` | 0.5 | reject multi-body crops |
-| `identity.threshold` | 0.85 | live match acceptance (cosine) |
-| `identity.min_score_gap` | 0.03 | best must beat runner-up by this |
-| `identity.top_k` / `bank_size` | 50 / 20 | candidates pulled / prototype bank |
-| `identity.reconcile.same_camera_threshold` | 0.90 | same-camera defrag merge |
+| `registry.enabled` | true | current inference uses Registry lookup |
+| `registry.collection` | registry_gallery | shared named-person gallery |
+| `registry.url` | http://localhost:6333 | shared Qdrant server |
+| `registry.threshold` / `top_k` | 0.85 / 5 | accept the top registry match |
+| `store.enabled` | false | legacy identity writes are off by default |
+| `identity.enabled` | false | legacy write-to-store path is disabled by default |
+| `identity.threshold` / `min_score_gap` | 0.85 / 0.03 | legacy live match acceptance |
+| `identity.top_k` / `bank_size` | 50 / 20 | legacy candidates / prototype bank |
+| `identity.reconcile.same_camera_threshold` | 0.90 | legacy same-camera defrag merge |
 | `identity.reconcile.min_tracklet_observations` | 3 | below this = detector noise |
-| `identity.reconcile.require_reciprocal_best` | true | mutual-NN guard on merges |
+| `identity.reconcile.require_reciprocal_best` | true | legacy mutual-NN guard on merges |

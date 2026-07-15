@@ -65,6 +65,58 @@ def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+
+def format_registry_label(payload):
+    """
+    Convert a registry payload into the human-readable label we draw on video.
+    Prefers name + employee id, but still falls back to whatever the registry
+    actually has so we never crash on a partial payload.
+    """
+    payload = payload or {}
+    name = payload.get("name")
+    employee_id = payload.get("employee_id")
+    person_id = payload.get("person_id")
+
+    parts = []
+    if name:
+        parts.append(str(name))
+    elif person_id is not None:
+        parts.append(f"Person {int(person_id)}")
+    elif employee_id:
+        parts.append(str(employee_id))
+
+    if employee_id and name:
+        parts.append(f"({employee_id})")
+    elif employee_id and not name and person_id is not None:
+        parts.append(f"({employee_id})")
+
+    return " ".join(parts) if parts else None
+
+
+def registry_match_for_embedding(store, embedding, threshold, top_k):
+    """
+    Read-only lookup against registry_gallery. Returns a small dict describing
+    the best match, or None if nothing clears the configured threshold.
+    """
+    hits = store.search(embedding, limit=top_k)
+    if not hits:
+        return None
+
+    hit = hits[0]
+    if float(hit.score) < float(threshold):
+        return None
+
+    payload = hit.payload or {}
+    label = format_registry_label(payload)
+    person_id = payload.get("person_id")
+    color_key = person_id if person_id is not None else (label or payload.get("employee_id"))
+    return {
+        "person_id": person_id,
+        "label": label,
+        "color_key": color_key,
+        "score": float(hit.score),
+    }
+
 def print_run_summary(store, jobs, cfg, run_id=None):
     """
     Print WHAT the run produced -- CONSOLE ONLY, no files written. Reads the
