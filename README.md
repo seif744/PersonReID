@@ -35,7 +35,7 @@ flowchart TD
     A4 --> QD
     B4 --> QD
 
-    QD[("🗄️ Qdrant\nshared gallery\n(all cameras write here)")]
+    QD[("Qdrant\nshared gallery\n(all cameras write here)")]
 
     QD --> RECON
 

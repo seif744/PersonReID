@@ -54,7 +54,9 @@ class PersonVectorStore:
                  url: Optional[str] = None,
                  api_key: Optional[str] = None,
                  collection: str = DEFAULT_COLLECTION,
-                 dim: int = EMBEDDING_DIM):
+                 dim: int = EMBEDDING_DIM,
+                 read_only: bool = False,
+                 ensure_collection: bool = True):
         """
         path       : folder for persistent local storage. Use ":memory:" for a
                      throwaway in-process store (tests).
@@ -67,6 +69,10 @@ class PersonVectorStore:
                      `url` and `path`.
         collection : the collection ("table") name.
         dim        : embedding size; guards every insert/search.
+        read_only  : when True, disable all mutating methods on this wrapper.
+        ensure_collection : when False, never create the collection on startup.
+                            Use this for read-only lookup against an existing
+                            collection so the wrapper does not write anything.
 
         Precedence: client > url > path. Exactly one backend is chosen.
         """
@@ -79,7 +85,9 @@ class PersonVectorStore:
                 self.client = QdrantClient(path=path)
         self.collection = collection
         self.dim = dim
-        self._ensure_collection()
+        self.read_only = read_only
+        if ensure_collection and not self.read_only:
+            self._ensure_collection()
 
     def _ensure_collection(self):
         """
@@ -95,6 +103,7 @@ class PersonVectorStore:
 
     def add(self, embedding: np.ndarray, payload: dict) -> str:
         """Store ONE embedding + its metadata. Returns the new point's id."""
+        self._ensure_writable("add")
         return self.add_many([embedding], [payload])[0]
 
     def add_many(self, embeddings, payloads: List[dict]) -> List[str]:
@@ -102,6 +111,7 @@ class PersonVectorStore:
         Store many embeddings in ONE call (a single upsert is far cheaper than N).
         `embeddings` and `payloads` must line up 1:1.
         """
+        self._ensure_writable("add_many")
         if len(embeddings) != len(payloads):
             raise ValueError("embeddings and payloads must have the same length")
 
@@ -140,6 +150,7 @@ class PersonVectorStore:
         with the surviving id. Only the payload field changes -- vectors and point
         ids are untouched, so the gallery stays intact.
         """
+        self._ensure_writable("set_global_id")
         if not point_ids:
             return
         self.client.set_payload(
@@ -156,6 +167,7 @@ class PersonVectorStore:
         detector noise) so they are not counted as real people. The observations
         stay in the gallery (vectors intact) but no longer carry an identity.
         """
+        self._ensure_writable("clear_global_id")
         if not point_ids:
             return
         self.client.delete_payload(
@@ -173,6 +185,7 @@ class PersonVectorStore:
         Drop and recreate the collection (wipe all points). For TESTS/DEMOS so
         reruns start clean. Never call this in production -- it deletes data.
         """
+        self._ensure_writable("reset")
         self.client.delete_collection(self.collection)
         self._ensure_collection()
 
@@ -189,3 +202,9 @@ class PersonVectorStore:
                 f"Model/collection dimension mismatch."
             )
         return arr.tolist()
+
+    def _ensure_writable(self, action: str) -> None:
+        if self.read_only:
+            raise RuntimeError(
+                f"PersonVectorStore is read-only; {action}() is disabled."
+            )

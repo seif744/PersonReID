@@ -79,11 +79,11 @@ reid:
     max_occlusion_ratio: 0.5 # reject a crop if another person's box covers more
                              # than this fraction of it (multi-person crop)
 
-# Vector store (Qdrant). Live embeddings are written here as the video plays.
-# This stage stores observations; assigning global ids is handled by the
-# Identity Service below.
+# Legacy vector store (Qdrant). Kept for the original identity pipeline.
+# When registry.enabled=true, inference skips writes and uses read-only lookup
+# against registry_gallery instead.
 store:
-  enabled: true
+  enabled: false
   path: qdrant_data          # persistent LOCAL Qdrant folder (dev / single process)
   # For PRODUCTION, point at a Qdrant SERVER instead of the local folder. Set the
   # url here (non-secret) OR via the QDRANT_URL env var; when a url is present it
@@ -91,10 +91,19 @@ store:
   # env var (see .env), never from this committed file.
   url: http://localhost:6333 # local Docker Qdrant server; clear this to use path
 
-# Identity Service (Stage 7): turns stored embeddings into stable global ids.
-# It is the ONLY component that assigns identity (the model + store never do).
-identity:
+# Registry lookup (read-only): inference checks local Qdrant's registry_gallery
+# and uses the returned name/employee id to label output videos. No writes.
+registry:
   enabled: true
+  collection: registry_gallery
+  url: http://localhost:6333
+  threshold: 0.85
+  top_k: 5
+
+# Legacy Identity Service (Stage 7): turns stored embeddings into stable global
+# ids. Left here for the original pipeline; disabled by default now.
+identity:
+  enabled: false
   threshold: 0.85  # cosine to accept a match. CALIBRATE per deployment
                              # (see the sweep in src/identity/demo_identity.py).
                              # Lower values merge more; higher values split more.
