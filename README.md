@@ -14,9 +14,9 @@ cameras** and **across re-appearances**. Produces annotated videos.
 
 ```mermaid
 flowchart TD
-    CFG(["⚙️ config.yaml / CLI"]) --> A1 & B1
+    CFG([" config.yaml / CLI"]) --> A1 & B1
 
-    subgraph LIVE["🎥 LIVE — one thread per camera, running at the same time"]
+    subgraph LIVE["LIVE — one thread per camera, running at the same time"]
         direction LR
         subgraph CAM_A["Camera A"]
             direction TB
@@ -35,7 +35,7 @@ flowchart TD
     A4 --> QD
     B4 --> QD
 
-    QD[("🗄️ Qdrant\nshared gallery\n(all cameras write here)")]
+    QD[("Qdrant\nshared gallery\n(all cameras write here)")]
 
     QD --> RECON
 
@@ -46,7 +46,7 @@ flowchart TD
         RECON --> SUMMARY["Print run summary\n(console only)"]
     end
 
-    RENDER --> OUT[("🎬 output_camA.mp4\n🎬 output_camB.mp4\nsame person = same GID\nin BOTH videos")]
+    RENDER --> OUT[("output_camA.mp4\n output_camB.mp4\nsame person = same GID\nin BOTH videos")]
 
     style CFG fill:#e8eef7,stroke:#4a6fa5,color:#1a1a1a
     style QD fill:#fdf3d7,stroke:#b8860b,color:#1a1a1a,stroke-width:2px

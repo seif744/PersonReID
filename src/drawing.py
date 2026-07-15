@@ -18,6 +18,8 @@ Reminder: OpenCV colours are (Blue, Green, Red), each 0-255. So:
 ============================================================================
 """
 
+import zlib
+
 import cv2
 
 # The colour we draw when there is NO track id yet (plain detection). Green.
@@ -49,7 +51,9 @@ def color_for_id(track_id):
     """
     if track_id is None:
         return BOX_COLOR
-    return _PALETTE[track_id % len(_PALETTE)]
+    if not isinstance(track_id, int):
+        track_id = zlib.crc32(str(track_id).encode("utf-8"))
+    return _PALETTE[int(track_id) % len(_PALETTE)]
 
 
 def draw_detections(frame, detections):
@@ -62,8 +66,12 @@ def draw_detections(frame, detections):
     for det in detections:
         # Colour by GLOBAL id when we have one, so the same person keeps the same
         # colour ACROSS cameras (that's the whole point of ReID). Fall back to the
-        # per-camera track id, then to green.
-        ident = det.global_id if det.global_id is not None else det.track_id
+        # registry person id / label, then the per-camera track id, then green.
+        ident = getattr(det, "registry_person_id", None)
+        if ident is None:
+            ident = getattr(det, "registry_color_key", None)
+        if ident is None:
+            ident = det.global_id if det.global_id is not None else det.track_id
         color = color_for_id(ident)
 
         # 1) The rectangle. cv2.rectangle needs the two opposite corners:
@@ -76,10 +84,15 @@ def draw_detections(frame, detections):
             BOX_THICKNESS,
         )
 
-        # 2) The text label. Lead with the GLOBAL id when present (e.g.
-        #    "GID 5  ID3"), else just the track id ("ID 3  0.87"), else "person".
-        if det.global_id is not None:
-            label = f"GID {det.global_id}  ID{det.track_id}"
+        # 2) The text label. Prefer the registry name when present, then the
+        #    GLOBAL id, else just the track id ("ID 3  0.87"), else "person".
+        registry_label = getattr(det, "registry_label", None)
+        if registry_label is not None:
+            label = (f"{registry_label}  ID{det.track_id}"
+                     if det.track_id is not None else f"{registry_label}")
+        elif det.global_id is not None:
+            label = (f"GID {det.global_id}  ID{det.track_id}"
+                     if det.track_id is not None else f"GID {det.global_id}")
         elif det.track_id is not None:
             label = f"ID {det.track_id}  {det.confidence:.2f}"
         else:
