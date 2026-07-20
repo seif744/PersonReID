@@ -2,10 +2,12 @@
 
 Multi-camera person re-identification (ReID) over recorded CCTV. Given one video
 per camera, the system detects and tracks people, embeds their appearance, and
-assigns a **global ID** that is stable for the same real person **across cameras**
-and **across re-appearances** within a camera. Output: annotated videos (boxes +
-global-ID labels) and a console run-summary. Per-person crop images are optional
-(`crops.save`, off by default).
+assigns a **reid id** that is stable for the same real person **across cameras**
+and **across re-appearances** within a camera. The pipeline is fully
+self-contained: it builds and owns its own Qdrant gallery — there is no separate
+registration step or external service. Output: annotated videos (boxes +
+reid-id labels, with `global_id` kept for compatibility) and a console
+run-summary. Per-person crop images are optional (`crops.save`, off by default).
 
 ---
 
@@ -16,14 +18,21 @@ Three layers, kept strictly independent (see `src/identity/DESIGN.md`):
 | Layer | Module | Knows about | Does NOT know about |
 |---|---|---|---|
 | **Appearance** | `reid/extractor.py` | one crop → 512-d vector | cameras, time, identity |
-| **Registry lookup** | `main.py`, `database/store.py` | registry gallery + nearest-neighbour lookup | how vectors are produced, camera topology |
-| **Legacy identity** | `identity/service.py`, `identity/reconcile.py` | appearance + **where** + **when** | registry labels, current default inference path |
+| **Storage** | `database/store.py` | vectors + payloads, nearest-neighbour search | how vectors are produced, camera topology |
+| **Identity** | `identity/service.py`, `identity/reconcile.py` | appearance + **where** + **when** | how the model computes a vector |
 
-Why: the model sees one crop with no context; the registry only knows vector
-distance plus human-curated payloads. Legacy identity logic still exists for
-older runs, but the default inference path is read-only lookup against
-`registry_gallery`, then annotation. That boundary keeps the code maintainable
-and prevents inference from mutating shared gallery state.
+Why: the model sees one crop with no context; the store only knows vector
+distance. Only the identity layer combines appearance with *where* and *when*
+a person was seen, so only it is allowed to decide who someone is. That
+boundary keeps the code maintainable.
+
+ADR-002 adds two more stages **inside** the identity layer's decision, between
+"find candidates" and "decide":
+
+| Stage | Module | Purpose |
+|---|---|---|
+| **Re-ranking** | `identity/reranking.py` | camera-aware k-reciprocal + Jaccard re-ranking of candidates, on top of raw cosine |
+| **Verification** | `identity/verifier.py` | scores each candidate's P(same identity) from multiple signals instead of a single rigid threshold |
 
 ---
 
@@ -45,8 +54,9 @@ and prevents inference from mutating shared gallery state.
    │ 4. CropSaver (optional)  frame+dets      → crops/<cam>/id_<t>/  (only if crops.save)
    │ 5. TrackEmbedder        crop             → det.embedding (512-d)  [shared model lock]
    │      └─ quality gate + occlusion gate + throttle/cache          │
-   │ 6. IdentityService      embedding+where+when → det.global_id   [identity lock]
-   │      └─ also COMMITS the observation to the vector store        │
+   │ 6. IdentityService      embedding+where+when → det.reid_id     [identity lock]
+   │      └─ candidate (Qdrant search) → re-rank (Upgrade 1) →       │
+   │         verify (Upgrade 2) → decide → COMMIT to the gallery     │
    │ 7. drawing → live display window; box geometry captured for the │
    │      final render (the video is NOT written in this pass)       │
    └─────────────────────────────────────────────────────────────┘
@@ -55,8 +65,8 @@ and prevents inference from mutating shared gallery state.
    ┌─────────────────────────────────────────────────────────────┐
    │ 8. reconcile_tracklets  OFFLINE, whole-gallery view:           │
    │      rebuild identities from tracklets, merge across cameras   │
-   │ 9. render_final_videos  re-draw with FINAL global ids →         │
-   │      output_<cam>.mp4  (same person = same GID in every video)  │
+   │ 9. render_final_videos  re-draw with FINAL reid ids →           │
+   │      output_<cam>.mp4  (same person = same REID in every video) │
    │ 10. print_run_summary   → console only (no files written)      │
    └─────────────────────────────────────────────────────────────┘
 ```
@@ -99,38 +109,85 @@ One per camera (cache keyed by per-camera `track_id`). `process()`:
 - Accepted crops go through **one batched forward pass**; rejected crops keep the
   track's last good vector.
 
-### Registry lookup helper — `main.py`
-After embedding a track, `registry_match_for_embedding()` searches the existing
-`registry_gallery` collection and returns a label payload when the top hit clears
-`registry.threshold`.
-- Read-only by design: it does `search()` only.
-- Uses the same 512-d cosine embeddings as the Registry service.
-- The label formatter prefers `name`, then `employee_id`, and falls back to
-  `person_id` if that is all the payload provides.
-
 ### PersonVectorStore — `src/database/store.py`
-Qdrant wrapper. In this repo it is used in read-only mode for inference against
-`registry_gallery`; the legacy identity path can still use writable collections
-when enabled.
+Thin Qdrant wrapper. This is the ONLY gallery the pipeline uses — the identity
+layer both writes to it and searches it.
+- `add`/`add_many(embedding, payload)` → one point per raw observation.
 - `search(embedding, k)` → k nearest by cosine.
 - `set_global_id(points, gid)` / `clear_global_id(points)` → payload rewrites
-  used by the legacy reconciliation path.
-- Backend precedence `client > url > path`; config uses `registry.url`
-  for the shared server, with `store.url` / `store.path` kept for compatibility.
+  used by offline reconciliation.
+- Backend precedence `client > url > path`; config uses `store.url` for a
+  shared Docker/Cloud server, `store.path` for a local single-process folder.
 
-### Legacy IdentityService — `src/identity/service.py`
-Compatibility layer for the older write-to-store pipeline. The current default
-config leaves it disabled.
+### IdentityService — `src/identity/service.py`
+The one component allowed to decide WHO someone is.
 - Sticky per track: decide once on a track's first observation, cache
-  `(camera, track_id) → global_id`, reuse thereafter.
-- `_match_or_mint()` searches the gallery, filters same-camera overlaps, scores
-  candidates with a prototype bank, and either reuses an id or mints a new one.
-- `_commit()` stores the observation under the chosen id and updates the bank.
-- Warm start rebuilds banks, spans, and the id counter from the store.
+  `(camera, track_id) → reid_id`, reuse thereafter. `global_id` is still
+  written in parallel for compatibility with older payload readers.
+- `assign()` → `_match_or_mint()`:
+  1. **Candidate retrieval**: `store.search()` for the top-`top_k` raw hits,
+     filtered to already-identified, non-same-camera-overlapping candidates.
+  2. **Re-ranking** (`identity.rerank.enabled`, Upgrade 1): if enabled,
+     `CameraAwareReranker` re-scores candidates using real k-reciprocal
+     neighbour sets + Jaccard overlap over identity prototypes, with a wider
+     neighbourhood window for cross-camera pairs (see §5).
+  3. **Verification** (`identity.verification.enabled`, Upgrade 2): if enabled,
+     `Verifier` scores each candidate's `P(same identity)` from cosine, the
+     re-ranked score, observation count, recency, and crop quality — replacing
+     the plain `score >= threshold and gap >= min_score_gap` check. If
+     disabled, falls back to that original plain check.
+  4. Accept the best candidate only if its score/probability clears the
+     configured threshold **and** beats the runner-up by the configured
+     margin; otherwise mint a new identity. The same-camera-overlap exclusion
+     is a **hard** pre-filter in both paths — never something a soft signal
+     can override (two people present in the same camera at the same time can
+     never be merged).
+- `_commit()` stores the observation under the chosen id, updates its
+  prototype bank, span cache, observation count, and last-seen record.
+- Warm start rebuilds all of the above from the store on startup, so a
+  persistent gallery survives process restarts.
+
+### CameraAwareReranker — `src/identity/reranking.py` (ADR-002 Upgrade 1)
+Real camera-aware k-reciprocal + Jaccard re-ranking (CA-Jaccard, CVPR'24) —
+**not** `cosine × camera_weight`. Operates over per-identity prototypes (the
+mean-pooled, re-normalized bank vectors `IdentityService` already keeps in
+memory), since Qdrant only holds raw per-observation points.
+- Builds a cached pairwise-cosine neighbour graph over all known identity
+  prototypes (cheap on CPU — tens of identities, not millions); rebuilt only
+  when the gallery signature changes.
+- For a query embedding: finds its reciprocal neighbour set among known
+  identities, widening the effective neighbourhood window
+  (`cross_camera_k1_boost`) for cross-camera comparisons, since cross-camera
+  cosine similarity runs systematically lower.
+- Blends `lambda * cosine + (1 - lambda) * (1 - jaccard_distance)`.
+- **Small-gallery guard**: with fewer known identities than `k1 + 1`,
+  reciprocal sets degenerate to trivial/empty sets and would fabricate a
+  "perfect" Jaccard overlap regardless of match quality — below that floor,
+  it falls back to plain cosine instead.
+
+### Verifier — `src/identity/verifier.py` (ADR-002 Upgrade 2)
+A HEURISTIC placeholder for the "verification layer" — a fixed-weight logistic
+combination of signals, not (yet) a trained model, since there is no labeled
+same/different-person dataset for this deployment. The interface —
+`Verifier.score(features) -> float` — is the same shape a trained
+classifier would expose (`model.predict_proba(...)`), and every decision's
+full feature vector + resulting probability is appended to
+`identity.verification.log_path` (`logs/verification_decisions.jsonl`), so a
+real MLP/GBT can be trained on accumulated deployment data later with **no
+change to the calling code**.
+- Features: cosine score, re-ranked score, `log1p(observation_count)`, frames
+  since last same-camera sighting, and a crop-quality scalar.
+- Weights are calibrated so cosine ≈ 0.63 sits near the decision boundary --
+  measured directly on this project's footage with the current
+  `osnet_x1_0_msmt17` checkpoint: genuinely different people's prototype
+  cosine tops out ~0.48-0.57, genuine cross-camera/cross-video matches reach
+  0.70-0.80. **Re-measure and re-anchor these weights whenever the ReID
+  checkpoint or camera domain changes** — they are specific to this model's
+  score distribution, not a universal constant.
 
 ### Legacy reconcile_tracklets — `src/identity/reconcile.py`
 Runs once after all cameras finish, with the full gallery visible. Rebuilds
-identities from scratch (does **not** trust live `global_id`s); the **tracklet**
+identities from scratch (does **not** trust live `reid_id`s); the **tracklet**
 (one camera's view of one track) is the unit of evidence.
 1. **Gather** points by `(camera, track_id)` → vectors, point ids, frame span,
    gids.
@@ -141,21 +198,37 @@ identities from scratch (does **not** trust live `global_id`s); the **tracklet**
    tracklets can never merge (provably two people).
 5. **Phase 1 — same-camera defrag**: merge same-camera, time-disjoint pairs with
    cosine ≥ `same_camera_threshold` (0.90).
-6. **Phase 2 — cross-camera**: on cluster prototypes, merge different-camera pairs
-   with cosine ≥ `threshold` (0.85) **and** (if `require_reciprocal_best`) mutual
-   nearest neighbour — stops one tracklet absorbing multiple look-alikes.
-7. **Survivor**: each final cluster keeps the smallest existing global ID
-   (deterministic); all its points rewritten via `set_global_id`.
+6. **Phase 2 — cross-camera, iterated to convergence**: on cluster prototypes,
+   merge different-camera pairs with cosine ≥ `threshold`
+   (`identity.reconcile.threshold`, 0.63) **and** (if `require_reciprocal_best`)
+   mutual nearest neighbour — stops one tracklet absorbing multiple
+   look-alikes. This is not a single pass: after any merges, cluster
+   prototypes change, so scores and reciprocal-best partners are recomputed
+   from scratch and another round runs, until a round merges nothing. This
+   matters for **chains** of mutually-similar fragments — e.g. A's own best
+   match is B, but B's own best match is C, not A — which a single pass would
+   leave stuck (A↔B never merges because B "prefers" C). Iterating lets the
+   chain fully consolidate (A merges with B in round 1; the merged A+B
+   cluster's new prototype then reciprocally matches C in round 2) while every
+   round still enforces the same mutual-best-match safety rule — merging never
+   gets easier than that rule allows, it just gets more chances to apply as
+   clusters grow. Each merge strictly reduces the number of clusters by one, so
+   this always terminates. This runs **independently of the verifier** above
+   (its own separate threshold, not the verifier's `accept_threshold`) —
+   recalibrate both together if you change the ReID checkpoint.
+7. **Survivor**: each final cluster keeps the smallest existing reid ID
+   (deterministic); all its points rewritten via `set_global_id` so both
+   `reid_id` and `global_id` stay aligned.
 
 ### render_final_videos — `main.py`
 Second render pass, after reconciliation. The live pass only captured per-frame
-box geometry; this maps each `(camera, track_id)` to its FINAL global ID
+box geometry; this maps each `(camera, track_id)` to its FINAL reid ID
 (`build_gid_map`, read back from the store) and re-draws the source frames so the
-same person carries the **same GID and colour in every camera's `output_<cam>.mp4`**.
+same person carries the **same REID and colour in every camera's `output_<cam>.mp4`**.
 
 ### print_run_summary — `main.py`
 Scrolls the store for this `run_id`; counts observations per camera and distinct
-global IDs; flags IDs seen in >1 camera as cross-camera. **Console output only —
+reid IDs; flags IDs seen in >1 camera as cross-camera. **Console output only —
 writes no files.**
 
 ---
@@ -165,25 +238,50 @@ writes no files.**
 - One **worker thread per camera video**; each owns its detector (independent
   ByteTrack state), crop saver, and TrackEmbedder.
 - **Shared, lock-guarded**: the ReID model (`model` lock — one forward pass at a
-  time) and the registry client (`registry` lock — shared read-only access to
-  Qdrant). If the legacy identity pipeline is enabled, its `identity` lock
-  serializes `assign()` so the old write path stays safe.
+  time) and the identity service (`identity` lock — serializes `assign()`,
+  since it both searches and writes the shared gallery).
 - OpenCV windows aren't thread-safe: workers publish frames to a shared buffer;
   the main thread displays (or just joins, headless).
 
 ---
 
-## 5. Legacy identity flow (disabled by default)
+## 5. ADR-002: why re-ranking + verification, not just a better threshold
 
-The write-to-store path is kept for compatibility, but the default inference flow
-does not use it. When enabled, the live decision is **sticky** to prevent
-per-frame ID flicker, but that creates a blind spot: a person in **two cameras
-at the same instant** is decided in each camera before the other has committed
-anything, so both mint separate IDs and can never reconcile live.
+Testing surfaced the failure mode that motivated this: with the original
+OSNet/Market1501 checkpoint on this footage, **different people scored closer
+than the same person** (a genuine same-person cross-camera match at cosine
+~0.72-0.76 vs. different-but-similar-looking people reaching ~0.83). The two
+distributions overlapped, so **no single cosine threshold was simultaneously
+correct** — raising it fixed false merges but created false splits, and vice
+versa. Switching to an OSNet/MSMT17 checkpoint substantially widened that gap
+on this footage (see §6) — but the underlying risk (some future camera/domain
+reintroducing overlap) is exactly what re-ranking and verification exist to
+guard against, not something a single "right" checkpoint permanently solves.
 
-Design bias throughout: **prefer a split over a merge.** A wrong merge fuses two
-people's histories and is unrecoverable; a split (one person given a spare ID)
-is recoverable. Thresholds are set high on purpose.
+Design principles this drives:
+- **False merges are worse than false splits.** A merge fuses two people's
+  histories and corrupts both; a split just gives one person a spare ID,
+  which reconciliation can still fix later. When uncertain, mint a new
+  identity rather than guess.
+- **Appearance generates candidates; it doesn't decide identity alone.**
+  Re-ranking (Upgrade 1) and verification (Upgrade 2) exist to combine
+  appearance with additional structure (neighbourhood overlap, observation
+  history, crop quality) before a decision is made — not to replace the
+  embedding model. Swapping the ReID *checkpoint* (same OSNet architecture,
+  same 512 dimensions) stays in-bounds of that constraint; introducing a
+  transformer backbone would not.
+- The hard same-camera-overlap physical exclusion is never overridden by a
+  soft signal — a physical impossibility is a different kind of fact than a
+  similarity score, and stays a hard veto in both the legacy and new decision
+  paths.
+
+**Deferred** (documented, not implemented): prototype confidence/variance with
+adaptive per-identity thresholds; a camera transition graph rejecting
+physically-impossible transitions; a MetaBIN training pass to reduce the
+underlying domain gap. These need either real camera topology or accumulated
+deployment data this project doesn't have yet — see
+`identity/verifier.py`'s decision log as the mechanism that starts collecting
+the latter.
 
 ---
 
@@ -191,17 +289,41 @@ is recoverable. Thresholds are set high on purpose.
 
 The pipeline is correct; the **embedding model is the ceiling** on this domain.
 
-- OSNet/Market-1501 is out-of-domain for this CCTV. Measured on the sample
-  footage: same-person cross-camera cosine falls to **0.68–0.82** while
-  *different* people reach **0.84–0.86**. The distributions **overlap**, so **no
-  single threshold** is simultaneously correct.
-- Effect on the sample clip: ~8 real people are correctly separated; the count
-  reports a few extra short fragments (safe splits); cross-camera linking catches
-  the easy front-facing pair and misses hard back-view/occluded pairs.
-- **The fix is a domain-appropriate embedding model** — synthetic pretrain
-  (RandPerson) and/or fine-tuning on target-domain crops — to widen the
-  same-vs-different gap so a threshold works. The identity layer is correct
-  scaffolding around that model.
+- **History**: the original OSNet/Market1501 checkpoint was out-of-domain for
+  this CCTV footage. Measured directly on this project's own videos: genuine
+  same-person matches across two different video sessions only reached
+  **cosine 0.65–0.76** (even after denoising via prototype averaging), while
+  *different* people reached **0.70–0.83** — the distributions **overlapped**,
+  so no fixed threshold could perfectly separate them.
+- **Current default (OSNet/MSMT17)**: re-measured on the same footage, this
+  checkpoint separates the two cases much better — different people's
+  prototype cosine tops out **~0.48–0.57**, genuine same-person cross-video
+  matches reach **~0.70–0.80**. A clean gap exists, and `identity.threshold` /
+  `identity.reconcile.threshold` / the verifier's weights are calibrated
+  against it (§3, §7). This is a config choice, not an architecture change —
+  MSMT17's more diverse camera/lighting conditions during training happen to
+  generalize better to this CCTV domain than Market1501's more controlled
+  benchmark setup.
+- **This is footage-and-checkpoint-specific, not solved in general.** A
+  different deployment (different cameras, lighting, clothing diversity)
+  could easily reintroduce distribution overlap even with MSMT17. Re-run
+  `identity/demo_identity.py`'s sweep (or the direct prototype-similarity
+  check used to validate this swap) whenever you point this at new footage,
+  and re-anchor the verifier's weights and thresholds if the gap changes.
+  That's why re-ranking and verification exist as a safety net on top of raw
+  cosine, and why the verifier logs decisions instead of claiming to be a
+  finished, trained classifier.
+- **If overlap reappears, the fix is still model-side**, roughly cheapest
+  first:
+  1. Try other available pretrained checkpoints (already done once here).
+  2. Fine-tune OSNet on crops collected from your own cameras (`crops.save:
+     true` already collects these) with a metric-learning loss (triplet /
+     ArcFace) — directly targets a specific deployment's domain gap.
+  3. Synthetic pretraining (RandPerson) and/or MetaBIN (see §5) — the
+     "textbook" fix, but there is currently no training pipeline in this repo
+     to build on (an earlier `tools/`/`notebooks/` scaffold for this was
+     removed) — this would mean building one from scratch, with real GPU
+     compute and experimentation time.
 
 ---
 
@@ -212,16 +334,21 @@ The pipeline is correct; the **embedding model is the ceiling** on this domain.
 | `detector.confidence_threshold` | 0.4 | drop weak detections |
 | `tracker.config` | bytetrack.yaml | tracker |
 | `crops.interval` | 10 | save a crop every N frames |
+| `reid.weights` | osnet_x1_0_msmt17.pth | ReID checkpoint — recalibrate everything below if this changes (§6) |
 | `reid.interval` / `ttl` | 10 / 300 | re-embed cadence / cache eviction |
 | `reid.quality.max_occlusion_ratio` | 0.5 | reject multi-body crops |
-| `registry.enabled` | true | current inference uses Registry lookup |
-| `registry.collection` | registry_gallery | shared named-person gallery |
-| `registry.url` | http://localhost:6333 | shared Qdrant server |
-| `registry.threshold` / `top_k` | 0.85 / 5 | accept the top registry match |
-| `store.enabled` | false | legacy identity writes are off by default |
-| `identity.enabled` | false | legacy write-to-store path is disabled by default |
-| `identity.threshold` / `min_score_gap` | 0.85 / 0.03 | legacy live match acceptance |
-| `identity.top_k` / `bank_size` | 50 / 20 | legacy candidates / prototype bank |
-| `identity.reconcile.same_camera_threshold` | 0.90 | legacy same-camera defrag merge |
+| `store.enabled` | true | the pipeline's own gallery — always on for the default flow |
+| `store.url` / `store.path` | http://localhost:6333 / qdrant_data | shared server vs. local single-process folder |
+| `identity.enabled` | true | assigns and merges reid ids |
+| `identity.threshold` / `min_score_gap` | 0.63 / 0.03 | plain-path match acceptance (used when verification is disabled) |
+| `identity.top_k` / `bank_size` | 50 / 20 | candidates considered / prototype bank size |
+| `identity.rerank.enabled` | true | ADR-002 Upgrade 1 |
+| `identity.rerank.k1` / `cross_camera_k1_boost` | 8 / 4 | reciprocal-neighbourhood size / cross-camera widening |
+| `identity.rerank.lambda_` | 0.7 | cosine vs. Jaccard blend weight |
+| `identity.verification.enabled` | true | ADR-002 Upgrade 2 |
+| `identity.verification.accept_threshold` / `min_prob_gap` | 0.55 / 0.05 | P(same) acceptance / runner-up margin |
+| `identity.verification.log_path` | logs/verification_decisions.jsonl | decision log for future model training |
+| `identity.reconcile.threshold` | 0.63 | cross-camera merge bar — separate from the verifier, recalibrate together |
+| `identity.reconcile.same_camera_threshold` | 0.90 | same-camera defrag merge |
 | `identity.reconcile.min_tracklet_observations` | 3 | below this = detector noise |
-| `identity.reconcile.require_reciprocal_best` | true | legacy mutual-NN guard on merges |
+| `identity.reconcile.require_reciprocal_best` | true | mutual-NN guard on cross-camera merges |

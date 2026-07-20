@@ -5,6 +5,7 @@
 detection_test.jpg
 *.mp4
 *.mov
+Screenshot 2026-07-17 181153.png
 vlc-record-*.avi
 !sample.mp4        # ...but DO allow a deliberately-added sample video if you add one
 

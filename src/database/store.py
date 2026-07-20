@@ -143,7 +143,8 @@ class PersonVectorStore:
 
     def set_global_id(self, point_ids: List[str], global_id: int) -> None:
         """
-        Reassign the global_id payload on already-stored points, in one call.
+        Reassign the cross-camera identity payload on already-stored points, in
+        one call.
 
         Used by the offline reconciliation pass: when two global_ids are found to
         be the same real person, every observation of the losing id is re-stamped
@@ -155,13 +156,13 @@ class PersonVectorStore:
             return
         self.client.set_payload(
             collection_name=self.collection,
-            payload={"global_id": int(global_id)},
+            payload={"global_id": int(global_id), "reid_id": int(global_id)},
             points=list(point_ids),
         )
 
     def clear_global_id(self, point_ids: List[str]) -> None:
         """
-        Remove the global_id payload key from points, marking them unidentified.
+        Remove the identity payload keys from points, marking them unidentified.
 
         Used by reconciliation to suppress spurious tracklets (e.g. one-frame
         detector noise) so they are not counted as real people. The observations
@@ -172,7 +173,7 @@ class PersonVectorStore:
             return
         self.client.delete_payload(
             collection_name=self.collection,
-            keys=["global_id"],
+            keys=["global_id", "reid_id"],
             points=list(point_ids),
         )
 

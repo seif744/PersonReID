@@ -49,10 +49,11 @@ crops:
 reid:
   enabled: true
   # OSNet person-ReID weights (dev checkpoint; swap for RandPerson before ship).
-  weights: src/reid/weights/osnet_x1_0_market1501.pth
+  weights: src/reid/weights/osnet_x1_0_msmt17.pth
   device: cpu                # "cuda" if you have a GPU
   interval: 10               # re-embed a given track at most once every N frames
   ttl: 300                   # forget a track from the cache after N unseen frames
+  warmup_embeddings: 3       # embed the first N successful observations of a new track
   # Cap on how many embeddings ONE track_id contributes over its life (0 = off).
   # A stable track's global id is ALREADY decided once and never re-matched (see
   # identity/service.py: the (camera, track_id) -> global_id cache), so occlusion
@@ -79,11 +80,11 @@ reid:
     max_occlusion_ratio: 0.5 # reject a crop if another person's box covers more
                              # than this fraction of it (multi-person crop)
 
-# Legacy vector store (Qdrant). Kept for the original identity pipeline.
-# When registry.enabled=true, inference skips writes and uses read-only lookup
-# against registry_gallery instead.
+# Vector store (Qdrant). Inference owns this gallery end-to-end: it writes
+# embeddings AND assigns identities against it -- no separate registration step,
+# no external service. This is the ONLY store the pipeline uses.
 store:
-  enabled: false
+  enabled: true
   path: qdrant_data          # persistent LOCAL Qdrant folder (dev / single process)
   # For PRODUCTION, point at a Qdrant SERVER instead of the local folder. Set the
   # url here (non-secret) OR via the QDRANT_URL env var; when a url is present it
@@ -91,25 +92,42 @@ store:
   # env var (see .env), never from this committed file.
   url: http://localhost:6333 # local Docker Qdrant server; clear this to use path
 
-# Registry lookup (read-only): inference checks local Qdrant's registry_gallery
-# and uses the returned name/employee id to label output videos. No writes.
-registry:
-  enabled: true
-  collection: registry_gallery
-  url: http://localhost:6333
-  threshold: 0.85
-  top_k: 5
-
-# Legacy Identity Service (Stage 7): turns stored embeddings into stable global
-# ids. Left here for the original pipeline; disabled by default now.
+# Identity Service (Stage 7): turns stored embeddings into stable global ids,
+# merging tracks/cameras that are the same person into one identity.
 identity:
-  enabled: false
-  threshold: 0.85  # cosine to accept a match. CALIBRATE per deployment
-                             # (see the sweep in src/identity/demo_identity.py).
-                             # Lower values merge more; higher values split more.
+  enabled: true
+  threshold: 0.63 # cosine to accept a match (used only when verification.enabled
+                             # is false, below). CALIBRATE per deployment -- measured
+                             # on this project's footage with osnet_x1_0_msmt17:
+                             # different people's prototype cosine tops out ~0.57,
+                             # genuine cross-video same-person matches reach 0.70-0.80.
+                             # Re-measure (see src/identity/demo_identity.py's sweep)
+                             # if the ReID weights or camera domain change.
   top_k: 50                  # nearest candidates to consider before deciding
   bank_size: 20              # recent good embeddings kept per global identity
   min_score_gap: 0.03        # best identity must beat runner-up by this much
+
+  # ADR-002 Upgrade 1: camera-aware re-ranking (real k-reciprocal + Jaccard,
+  # CVPR'24 CA-Jaccard) over identity prototypes, between raw KNN candidate
+  # retrieval and the accept/reject decision. See src/identity/reranking.py.
+  rerank:
+    enabled: true
+    k1: 8                          # neighbourhood size for reciprocal-set construction
+    cross_camera_k1_boost: 4       # widen k1 by this much for cross-camera reciprocity
+                                    # checks, since cross-camera similarity runs lower
+    lambda_: 0.7                   # final_score = lambda*cosine + (1-lambda)*(1-jaccard_dist)
+
+  # ADR-002 Upgrade 2: verification layer. Replaces the rigid
+  # threshold+min_score_gap gate with a scored combination of signals. This is a
+  # HEURISTIC (hand-set weights) for now -- every decision's feature vector is
+  # logged to log_path so a real MLP/GBT can be trained on accumulated
+  # deployment data later, with no change to the calling code.
+  # See src/identity/verifier.py.
+  verification:
+    enabled: true
+    accept_threshold: 0.55   # P(same identity) must clear this to accept
+    min_prob_gap: 0.05       # winner must beat runner-up P(same) by this much
+    log_path: logs/verification_decisions.jsonl
 
   # Offline reconciliation (Stage 7b): after ALL cameras finish, rebuild global
   # ids from camera-local tracklets and merge the ones that are the same person
@@ -117,7 +135,10 @@ identity:
   # which the sticky live decision cannot catch.
   reconcile:
     enabled: true
-    threshold:               # prototype cosine to merge; blank = use identity.threshold
+    threshold: 0.63          # prototype cosine to merge cross-camera; blank = use
+                             # identity.threshold. Set explicitly here because this
+                             # runs independently of the verifier (see verifier.py) --
+                             # it must be recalibrated whenever identity.threshold is.
     same_camera_threshold: 0.90  # stricter merge for fragmented tracks in one camera
     min_tracklet_observations: 3  # a real identity needs >= this many observations;
                                    # shorter tracks are detector noise, not people

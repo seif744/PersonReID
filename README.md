@@ -1,8 +1,10 @@
 # Multi-Camera Person Re-Identification
 
 Detect and track people across multiple camera videos, embed their appearance,
-and assign a **global ID** that stays the same for one real person **across
-cameras** and **across re-appearances**. Produces annotated videos.
+and assign a **reid id** that stays the same for one real person **across
+cameras** and **across re-appearances**. The pipeline is fully self-contained —
+it builds and owns its own Qdrant gallery; there is no separate registration
+step or external service. Produces annotated videos.
 
 > **How it works internally:** see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
 > full data flow, every component, the concurrency model, and design rationale.
@@ -22,31 +24,31 @@ flowchart TD
             direction TB
             A1(["Video frame"]) --> A2["Detect + Track\n(YOLO11n + ByteTrack)"]
             A2 --> A3["Embed crop\n(OSNet, 512-d)"]
-            A3 --> A4["Assign a\nglobal ID"]
+            A3 --> A4["Re-rank + verify\ncandidates -> assign\na reid id"]
         end
         subgraph CAM_B["Camera B"]
             direction TB
             B1(["Video frame"]) --> B2["Detect + Track\n(YOLO11n + ByteTrack)"]
             B2 --> B3["Embed crop\n(OSNet, 512-d)"]
-            B3 --> B4["Assign a\nglobal ID"]
+            B3 --> B4["Re-rank + verify\ncandidates -> assign\na reid id"]
         end
     end
 
     A4 --> QD
     B4 --> QD
 
-    QD[("Qdrant\nshared gallery\n(all cameras write here)")]
+    QD[("Qdrant\nown gallery\n(all cameras write here)")]
 
     QD --> RECON
 
     subgraph FINAL["🏁 OFFLINE — runs ONCE, after every camera finishes"]
         direction TB
         RECON["Reconcile tracklets\nlink the same person\nacross cameras"]
-        RECON --> RENDER["Re-render videos\nusing the FINAL\nglobal ids"]
+        RECON --> RENDER["Re-render videos\nusing the FINAL\nreid ids"]
         RECON --> SUMMARY["Print run summary\n(console only)"]
     end
 
-    RENDER --> OUT[("🎬 output_camA.mp4\n🎬 output_camB.mp4\nsame person = same GID\nin BOTH videos")]
+    RENDER --> OUT[("🎬 output_camA.mp4\n🎬 output_camB.mp4\nsame person = same REID\nin BOTH videos")]
 
     style CFG fill:#e8eef7,stroke:#4a6fa5,color:#1a1a1a
     style QD fill:#fdf3d7,stroke:#b8860b,color:#1a1a1a,stroke-width:2px
@@ -57,13 +59,13 @@ flowchart TD
     style CAM_B fill:#ffffff,stroke:#9fb3cf
 ```
 
-Each camera runs the **top** section live, on its own thread, checking against
-one shared `registry_gallery` collection in Qdrant. Inference does **not**
-write to that collection; the separate Registry service populates it. Only
-after **every** camera finishes does the **bottom** section run — once: it
-links the same person across cameras, then re-renders the annotated videos with
-those final IDs, so one person carries the same `GID n` in every camera's
-output. Full per-stage detail:
+Each camera runs the **top** section live, on its own thread, against ONE
+shared Qdrant gallery that this pipeline itself writes to and reads from —
+no other service is involved. Only after **every** camera finishes does the
+**bottom** section run — once: it links the same person across cameras, then
+re-renders the annotated videos with those final IDs, so one person carries
+the same `REID n` in every camera's output. `global_id` is still written for
+compatibility, but `reid_id` is the label the pipeline presents. Full per-stage detail:
 **[ARCHITECTURE.md §2](ARCHITECTURE.md)**.
 
 ---
@@ -72,7 +74,7 @@ output. Full per-stage detail:
 1. [Prerequisites](#1-prerequisites)
 2. [Install the Python environment](#2-install-the-python-environment)
 3. [Model weights](#3-model-weights)
-4. [Connect to Qdrant / Registry](#4-connect-to-qdrant--registry)
+4. [Connect to Qdrant](#4-connect-to-qdrant)
 5. [Configure your run](#5-configure-your-run)
 6. [Run the pipeline](#6-run-the-pipeline)
 7. [Understand the output](#7-understand-the-output)
@@ -85,9 +87,9 @@ output. Full per-stage detail:
 ## 1. Prerequisites
 
 - **Python 3.10** (the project is verified on 3.10.12).
-- **Docker** + **Docker Compose** — used to run the shared Qdrant server that
-  Registry writes to and Inference reads from. Install Docker Desktop
-  (Windows/macOS) or Docker Engine (Linux). Verify:
+- **Docker** + **Docker Compose** — used to run the Qdrant server this
+  pipeline writes its own gallery to. Install Docker Desktop (Windows/macOS)
+  or Docker Engine (Linux). Verify:
   ```bash
   docker --version
   docker compose version
@@ -124,20 +126,30 @@ Two model files are needed:
 | File | How to get it | In a fresh clone? |
 |---|---|---|
 | `yolo11n.pt` (detector) | **Auto-downloaded** by ultralytics on first run | No (gitignored; fetched automatically) |
-| `src/reid/weights/osnet_x1_0_market1501.pth` (ReID) | **Committed to the repo** | Yes — already present |
+| `src/reid/weights/osnet_x1_0_msmt17.pth` (ReID, default) | Committed to the repo | Yes — already present |
 
-The OSNet checkpoint is committed, so a fresh clone already has it — no download
-step. (If it is ever missing, get `osnet_x1_0_market1501.pth` from the torchreid
-model zoo and place it at `src/reid/weights/`.) The path is set by `reid.weights`
-in `config.yaml`.
+The default ReID checkpoint is OSNet x1_0 trained on **MSMT17** (set by
+`reid.weights` in `config.yaml`), not the more commonly-referenced Market1501
+checkpoint. On this project's own footage, MSMT17 measurably separates
+same-person from different-person matches better — Market1501 gave same- and
+different-person cosine scores that overlapped in the same 0.70-0.85 range,
+while MSMT17 keeps different people under ~0.57 and genuine matches at
+0.70-0.80 (see [ARCHITECTURE.md §6](ARCHITECTURE.md)). If you ever need to
+re-fetch it: it comes from the official `deep-person-reid` MODEL_ZOO
+(`osnet_x1_0`, trained on MSMT17) — download via `gdown` from the Google Drive
+link on that page and place it at `src/reid/weights/`.
+
+`src/reid/weights/osnet_x1_0_market1501.pth` is also still present (the
+original default) — swap `reid.weights` back to it if you want to compare, but
+it is **not recommended** for this project's footage given the measured overlap
+above.
 
 ---
 
-## 4. Connect to Qdrant / Registry
+## 4. Connect to Qdrant
 
-Inference only reads from Qdrant. The Registry service populates the
-`registry_gallery` collection; this repo uses it as a read-only lookup so it
-can label detections and produce annotated output.
+The pipeline needs somewhere to store its own gallery of embeddings + global
+ids. It both writes to and reads from this store — nothing else does.
 
 ### 4a. Start the Qdrant server (recommended)
 
@@ -153,8 +165,6 @@ This launches `qdrant/qdrant:latest` and exposes:
 - **gRPC (optional):** `localhost:6334`
 
 Data persists in `./qdrant_storage/` (gitignored), so it survives restarts.
-If you already run Registry against another Qdrant endpoint, point Inference at
-that same server instead.
 
 Verify it's up:
 ```bash
@@ -165,19 +175,14 @@ Stop it later with `docker compose down` (your data is kept).
 
 ### 4b. Tell the pipeline where Qdrant is
 
-The registry lookup backend is chosen with this precedence:
-**`QDRANT_URL` env var → `registry.url` in config.yaml → `store.url` /
-`store.path` as a fallback for older local setups**.
+Backend precedence: **`QDRANT_URL` env var → `store.url` in config.yaml →
+`store.path`** (a local embedded folder, single-process only).
 
 Out of the box, `config.yaml` already has:
 ```yaml
-registry:
-  enabled: true
-  collection: registry_gallery
-  url: http://localhost:6333
-
 store:
-  enabled: false
+  enabled: true
+  url: http://localhost:6333
 ```
 so no extra step is needed for local Docker. If you prefer env-based config,
 create a `.env` file in the project root:
@@ -192,17 +197,16 @@ QDRANT_URL=https://<your-cluster>.cloud.qdrant.io:6333
 QDRANT_API_KEY=<your-key>
 ```
 
-### 4c. Legacy only: embedded mode (no Docker)
+### 4c. Embedded mode (no Docker, single process only)
 
-This repo no longer uses embedded mode in the default inference flow, because
-the registry gallery is meant to be shared. The old `store` path still supports
-a local single-process fallback for legacy runs:
 ```yaml
 store:
+  enabled: true
   url:                 # leave blank
   path: qdrant_data    # local folder, created automatically
 ```
-Note: embedded mode locks the folder to one process and is dev-only.
+This locks the folder to one process — fine for a quick local test, not for
+multiple concurrent runs.
 
 ---
 
@@ -234,27 +238,36 @@ tracker:
   enabled: true
   config: bytetrack.yaml
 
-
 reid:
   enabled: true
-  weights: src/reid/weights/osnet_x1_0_market1501.pth
+  weights: src/reid/weights/osnet_x1_0_msmt17.pth
   device: cpu                    # "cuda" if you have a GPU
   interval: 10                   # re-embed a track at most every N frames
 
-registry:
-  enabled: true
-  collection: registry_gallery
-  url: http://localhost:6333     # shared Qdrant server (see section 4)
-  threshold: 0.85                # cosine to accept a registry match
-  top_k: 5
-
 store:
-  enabled: false                 # legacy identity pipeline only
+  enabled: true
+  url: http://localhost:6333     # shared Qdrant server (see section 4)
 
 identity:
-  enabled: false                 # legacy identity pipeline only
+  enabled: true
+  threshold: 0.63                # plain-path cosine acceptance (used only
+                                  # when verification.enabled is false) --
+                                  # calibrated for the MSMT17 checkpoint
+  min_score_gap: 0.03
+  rerank:                        # ADR-002 Upgrade 1: camera-aware re-ranking
+    enabled: true
+    k1: 8
+    cross_camera_k1_boost: 4
+    lambda_: 0.7
+  verification:                  # ADR-002 Upgrade 2: scored verification layer
+    enabled: true
+    accept_threshold: 0.55
+    min_prob_gap: 0.05
+    log_path: logs/verification_decisions.jsonl
   reconcile:
     enabled: true
+    threshold: 0.63               # cross-camera merge bar -- independent of the
+                                   # verifier above; recalibrate both together
     same_camera_threshold: 0.90
     min_tracklet_observations: 3
     require_reciprocal_best: true
@@ -270,7 +283,7 @@ See [ARCHITECTURE.md §7](ARCHITECTURE.md) for what every knob does.
 
 ## 6. Run the pipeline
 
-With the venv active and the shared Qdrant server reachable:
+With the venv active and Qdrant reachable:
 
 ```bash
 python main.py                       # uses the videos listed in config.yaml
@@ -294,8 +307,8 @@ Precedence: `--videos` > `--videos-dir` > `config.yaml source.videos`. Missing
 files fail fast with a clear message; duplicate names are made unique
 automatically.
 
-If you need the legacy reset path, `--reset` wipes the old `store` collection
-first. It does not touch `registry_gallery`.
+`--reset` wipes the store's collection first, so a run starts from an empty
+gallery. **Destructive** — deletes every stored embedding/identity:
 
 ```bash
 python main.py --reset --videos-dir /path/to/footage
@@ -312,24 +325,22 @@ A run produces:
 
 | Artifact | Location | What it is |
 |---|---|---|
+| Annotated videos | `output_<camera>.mp4` | source video with boxes + `REID n  IDk` labels drawn |
+| Gallery | Qdrant (`store.url` / `store.path`) | every observation + assigned reid id (plus compatibility `global_id`) — this pipeline's own data |
+| Verification decision log | `logs/verification_decisions.jsonl` | one line per accept/reject decision, with its full feature vector — for calibrating or eventually training the verifier |
 
-| Annotated videos | `output_<camera>.mp4` | source video with boxes + `GID n  IDk` labels drawn |
-| Registry gallery | Qdrant (`registry_gallery` on the shared server) | read-only lookup for names / employee ids |
+That's it — no crop images by default. (Per-person crop images can be turned
+back on with `crops.save: true` in `config.yaml`, e.g. to collect ReID training
+data or visually sanity-check identity assignment.)
 
-That's it — no crop images and no report files are written. (Per-person crop
-images can be turned back on with `crops.save: true` in `config.yaml`, e.g. to
-collect ReID training data, but they are **off by default**.)
-
-Registry lookups do not change the gallery contents during inference. The
-console still prints a **RUN SUMMARY** at the end for the legacy identity path,
-e.g.:
+The console prints a **RUN SUMMARY** at the end, e.g.:
 ```
-Store: 516 observations -> 11 distinct people (global_ids)
+Store: 516 observations -> 11 distinct people (reid_ids)
 Cross-camera people: 1
-  GID 1: cam_219 (track 0004 + 0025) + cam_224 (track 0001)
+  REID 1: cam_219 (track 0004 + 0025) + cam_224 (track 0001)
 ```
-- **distinct people** = number of global IDs after reconciliation.
-- **Cross-camera people** = global IDs seen in more than one camera (the product's
+- **distinct people** = number of reid IDs after reconciliation.
+- **Cross-camera people** = reid IDs seen in more than one camera (the product's
   core result).
 
 ---
@@ -338,13 +349,14 @@ Cross-camera people: 1
 
 | Symptom | Cause / fix |
 |---|---|
-| `Connection refused` / registry errors | Qdrant isn't running or `registry_gallery` is unavailable. `docker compose up -d`, then `curl http://localhost:6333/readyz`. |
-| `Unexpected checkpoint keys dropped` | Wrong/corrupt ReID weights. Re-fetch `osnet_x1_0_market1501.pth` to `src/reid/weights/`. |
+| `Connection refused` | Qdrant isn't running. `docker compose up -d`, then `curl http://localhost:6333/readyz`. |
+| `Unexpected checkpoint keys dropped` | Wrong/corrupt ReID weights. Re-fetch `osnet_x1_0_msmt17.pth` to `src/reid/weights/`. |
 | Hangs on first run for a while | `yolo11n.pt` is downloading; subsequent runs are fast. |
 | Very slow on CPU | Set `source.resize_width: 1280` and/or `source.max_frames` for tests. |
-| "database is locked" | Legacy embedded mode (`store.path`) is single-process. Use the shared Docker server (`registry.url` or `store.url`). |
+| "database is locked" | Embedded mode (`store.path`) is single-process. Use the shared Docker server (`store.url`), or stop other runs using the same folder. |
 | No windows appear | `display.show_window: false` (headless). Set `true` for live windows. |
-| Counts look too high / people split | Expected on out-of-domain footage — see limitations below. |
+| Same person shows up as two different reid ids | Expected on out-of-domain footage when cosine similarity is borderline — see limitations below. Check `logs/verification_decisions.jsonl` for that decision's actual scores. |
+| Two different people merge into one reid id | The rarer, worse failure. If it happens often, tighten `identity.verification.accept_threshold` / `min_prob_gap` (or `identity.threshold` / `min_score_gap` if verification is disabled). |
 
 ---
 
@@ -358,24 +370,39 @@ docker-compose.yml          Qdrant server
 ARCHITECTURE.md             deep-dive: data flow, components, design
 src/
   video_source.py           frame decoding
-  detector.py               YOLO11 + ByteTrack, Detection, crop_person
-  crop_saver.py             per-track crop persistence (only when crops.save: true)
-  drawing.py                boxes / HUD overlay
+  detector.py                YOLO11 + ByteTrack, Detection, crop_person
+  crop_saver.py               per-track crop persistence (only when crops.save: true)
+  drawing.py                  boxes / HUD overlay
   reid/
-    extractor.py            crop -> 512-d L2-normalized embedding (OSNet)
-    service.py              TrackEmbedder: throttle, cache, quality + occlusion gates
-    weights/                ReID model checkpoint
+    extractor.py              crop -> 512-d L2-normalized embedding (OSNet)
+    service.py                 TrackEmbedder: throttle, cache, quality + occlusion gates
+    weights/                    ReID model checkpoint
   database/
-    store.py                Qdrant wrapper (PersonVectorStore; legacy writes, read-only lookups)
+    store.py                   Qdrant wrapper (PersonVectorStore) -- this pipeline's own gallery
   identity/
-    service.py              live global-ID assignment (candidate->decide->commit)
-    reconcile.py            offline cross-camera reconciliation
-    DESIGN.md               why the layers are separated
-tools/
-  prepare_randperson_subset.py   dataset prep for the model-fix path
-notebooks/                  training/experiment notebooks (incl. RandPerson)
+    service.py                  global-ID assignment (candidate -> re-rank -> verify -> decide -> commit)
+    reranking.py                 ADR-002 Upgrade 1: camera-aware k-reciprocal + Jaccard re-ranking
+    verifier.py                  ADR-002 Upgrade 2: scored verification layer + decision logging
+    reconcile.py                 offline cross-camera reconciliation
+    DESIGN.md                    why the layers are separated
 ```
 
-Generated at runtime (gitignored): `output_*.mp4`,`qdrant_storage/`, `qdrant_data/`.
+Generated at runtime (gitignored): `output_*.mp4`, `logs/`, `qdrant_storage/`,
+`qdrant_data/`.
 
 ---
+
+## 10. Known limitations & roadmap
+
+The pipeline is correct; the embedding model is the ceiling on this domain —
+see **[ARCHITECTURE.md §6](ARCHITECTURE.md)** for the measured same-vs-different
+score overlap and why no threshold (or hand-tuned heuristic on top of it) can
+perfectly resolve it.
+
+ADR-002's P0 items (camera-aware re-ranking, a scored verification layer) are
+implemented; the following are deferred and documented but not built:
+- Prototype confidence/variance with adaptive per-identity thresholds.
+- A camera transition graph rejecting physically-impossible transitions.
+- A MetaBIN training pass to reduce the underlying domain gap.
+- Training a real classifier from `logs/verification_decisions.jsonl` once
+  enough runs accumulate, to replace the current hand-set verifier weights.
