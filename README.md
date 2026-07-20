@@ -6,7 +6,7 @@ cameras** and **across re-appearances**. Produces annotated videos.
 
 > **How it works internally:** see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
 > full data flow, every component, the concurrency model, and design rationale.
-> This README is the *get-it-running* guide.
+
 
 ---
 
