@@ -66,62 +66,11 @@ def load_config(path="config.yaml"):
         return yaml.safe_load(f)
 
 
-def format_registry_label(payload):
-    """
-    Convert a registry payload into the human-readable label we draw on video.
-    Prefers name + employee id, but still falls back to whatever the registry
-    actually has so we never crash on a partial payload.
-    """
-    payload = payload or {}
-    name = payload.get("name")
-    employee_id = payload.get("employee_id")
-    person_id = payload.get("person_id")
-
-    parts = []
-    if name:
-        parts.append(str(name))
-    elif person_id is not None:
-        parts.append(f"Person {int(person_id)}")
-    elif employee_id:
-        parts.append(str(employee_id))
-
-    if employee_id and name:
-        parts.append(f"({employee_id})")
-    elif employee_id and not name and person_id is not None:
-        parts.append(f"({employee_id})")
-
-    return " ".join(parts) if parts else None
-
-
-def registry_match_for_embedding(store, embedding, threshold, top_k):
-    """
-    Read-only lookup against registry_gallery. Returns a small dict describing
-    the best match, or None if nothing clears the configured threshold.
-    """
-    hits = store.search(embedding, limit=top_k)
-    if not hits:
-        return None
-
-    hit = hits[0]
-    if float(hit.score) < float(threshold):
-        return None
-
-    payload = hit.payload or {}
-    label = format_registry_label(payload)
-    person_id = payload.get("person_id")
-    color_key = person_id if person_id is not None else (label or payload.get("employee_id"))
-    return {
-        "person_id": person_id,
-        "label": label,
-        "color_key": color_key,
-        "score": float(hit.score),
-    }
-
 def print_run_summary(store, jobs, cfg, run_id=None):
     """
     Print WHAT the run produced -- CONSOLE ONLY, no files written. Reads the
     gallery back from the store: total observations, distinct people
-    (global_ids), and which people were seen in more than one camera (the
+    (reid_ids), and which people were seen in more than one camera (the
     product's core result). Then lists the annotated videos on disk.
     """
     from collections import defaultdict
@@ -134,7 +83,7 @@ def print_run_summary(store, jobs, cfg, run_id=None):
         try:
             cam_obs = defaultdict(int)
             gid_obs = defaultdict(int)
-            # global_id -> camera -> set of track ids seen for that person there.
+            # reid_id -> camera -> set of track ids seen for that person there.
             gid_cameras = defaultdict(lambda: defaultdict(set))
             offset = None
             while True:
@@ -146,7 +95,7 @@ def print_run_summary(store, jobs, cfg, run_id=None):
                     if run_id is not None and pl.get("run_id") != run_id:
                         continue
                     cam_obs[pl.get("camera")] += 1
-                    gid = pl.get("global_id")
+                    gid = pl.get("reid_id", pl.get("global_id"))
                     if gid is None:
                         continue
                     gid_obs[gid] += 1
@@ -157,7 +106,7 @@ def print_run_summary(store, jobs, cfg, run_id=None):
             total = sum(cam_obs.values())
             cross_ids = sorted(g for g, cams in gid_cameras.items() if len(cams) > 1)
             print(f"  Store: {total} observations -> "
-                  f"{len(gid_obs)} distinct people (global_ids)")
+                  f"{len(gid_obs)} distinct people (reid_ids)")
             print(f"  Cross-camera people: {len(cross_ids)}")
             for gid in cross_ids:
                 parts = []
@@ -303,7 +252,7 @@ def build_gid_map(store, run_id):
             pl = p.payload or {}
             if run_id is not None and pl.get("run_id") != run_id:
                 continue
-            gid = pl.get("global_id")
+            gid = pl.get("reid_id", pl.get("global_id"))
             if gid is None:
                 continue
             votes[(pl.get("camera"), pl.get("track_id"))][gid] += 1
@@ -322,15 +271,16 @@ def render_final_videos(jobs, cfg, shared, store, run_id):
     frames (cheap; no model) and draw the captured boxes, so boxes/track ids match
     the live pass exactly.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from types import SimpleNamespace
     gid_map = build_gid_map(store, run_id)
     resize_width = cfg["source"].get("resize_width", 0)
     fps = float(cfg["display"].get("output_fps", 20.0))
 
-    for name, path, *_ in jobs:
+    def render_one(name, path):
         annos = shared["annotations"].get(name)
         if not annos:
-            continue
+            return
         out_path = f"output_{name}.mp4"
         writer = None
         try:
@@ -354,23 +304,15 @@ def render_final_videos(jobs, cfg, shared, store, run_id):
                             y2 = anno["y2"]
                             track_id = anno.get("track_id")
                             conf = anno.get("confidence", 0.0)
-                            registry_label = anno.get("registry_label")
-                            registry_color_key = anno.get("registry_color_key")
-                            registry_person_id = anno.get("registry_person_id")
                         else:
                             x1, y1, x2, y2, track_id, conf = anno[:6]
-                            registry_label = None
-                            registry_color_key = None
-                            registry_person_id = None
 
                         dets.append(
                             SimpleNamespace(
                                 x1=x1, y1=y1, x2=x2, y2=y2,
                                 track_id=track_id, confidence=conf,
                                 global_id=gid_map.get((name, track_id)),
-                                registry_label=registry_label,
-                                registry_color_key=registry_color_key,
-                                registry_person_id=registry_person_id,
+                                reid_id=gid_map.get((name, track_id)),
                             )
                         )
                     frame = draw_detections(frame, dets)
@@ -388,6 +330,12 @@ def render_final_videos(jobs, cfg, shared, store, run_id):
                 writer.release()
                 print(f"[render] Final annotated video -> {out_path}")
 
+    max_workers = min(len(jobs), os.cpu_count() or len(jobs) or 1)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(render_one, name, path) for name, path, *_ in jobs]
+        for fut in futures:
+            fut.result()
+
 
 # =============================================================================
 # The WORKER: runs the whole pipeline for ONE video, on its own thread.
@@ -396,8 +344,7 @@ def render_final_videos(jobs, cfg, shared, store, run_id):
 #   - publishes its latest annotated frame into `shared` for the main thread.
 # =============================================================================
 def process_video(name, path, detector, crop_saver, embedder, store, identity,
-                  registry_store, registry_cfg, locks, cfg, shared, stop_event,
-                  run_id):
+                  locks, cfg, shared, stop_event, run_id):
     trk_cfg = cfg["tracker"]
     # 0 = process the whole video; a positive number stops early (handy for a
     # quick CPU test without waiting for hundreds of frames).
@@ -408,16 +355,16 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
     # cost. Everything downstream uses the same resized frame, so coords stay
     # consistent (crops are smaller too).
     resize_width = cfg["source"].get("resize_width", 0)
+    show_window = cfg["display"].get("show_window", True)
 
     tag = f"[{name}]"
     frame_index = 0
     processed_here = 0   # how many fresh embeddings THIS camera has checked
-    registry_hits = {}   # track_id -> latest accepted registry match
     # Per-frame box geometry captured for the FINAL re-render pass. We record the
     # boxes + track ids (NOT the pixels) as we go, so after cross-camera
     # reconciliation we can re-draw the video with the final global ids without
     # re-running detection. annotations[f] = dicts with box coords, track id,
-    # confidence, and optional registry label metadata.
+    # and confidence.
     annotations = []
 
     try:
@@ -449,37 +396,27 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
 
                 # ---- STAGE 5/6: embed tracked people + check Qdrant ---------
                 # Uses the CLEAN frame (before boxes are drawn). We embed each
-                # track (throttled + cached by TrackEmbedder) and then either:
-                #   * look it up in registry_gallery (read-only), or
-                #   * fall back to the legacy identity/store path when registry
-                #     lookup is disabled.
+                # track (throttled + cached by TrackEmbedder) and hand fresh
+                # embeddings to the Identity Service, which searches its own
+                # gallery and assigns a stable GLOBAL id (or falls back to just
+                # persisting raw observations when identity assignment is off).
                 if embedder is not None:
                     with locks["model"]:            # shared model: one at a time
                         embedder.process(frame, detections, frame_index)
                     fresh = embedder.last_embedded   # tracks re-embedded this frame
 
-                    if registry_store is not None and fresh:
-                        with locks["registry"]:
-                            for d in fresh:
-                                match = registry_match_for_embedding(
-                                    registry_store,
-                                    d.embedding,
-                                    registry_cfg.get("threshold", 0.85),
-                                    registry_cfg.get("top_k", 5),
-                                )
-                                if match is not None:
-                                    registry_hits[d.track_id] = match
-                        processed_here += len(fresh)
-                    elif identity is not None and fresh:
+                    if identity is not None and fresh:
                         # Turn fresh embeddings into stable GLOBAL ids. The service
                         # searches the gallery AND commits under the chosen id, so
                         # it is the sole writer -- serialize it with one lock.
                         with locks["identity"]:
                             for d in fresh:
-                                d.global_id = identity.assign(
+                                gid = identity.assign(
                                     name, d.track_id, d.embedding, frame_index,
                                     run_id=run_id,
                                     crop_quality=d.crop_quality)
+                                d.global_id = gid
+                                d.reid_id = gid
                         processed_here += len(fresh)
                     elif store is not None and fresh:
                         # Identity off: just persist the raw observations.
@@ -497,17 +434,6 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                             store.add_many([d.embedding for d in fresh], payloads)
                         processed_here += len(fresh)
 
-                    if registry_store is not None:
-                        for d in detections:
-                            if d.track_id is None:
-                                continue
-                            match = registry_hits.get(d.track_id)
-                            if match is None:
-                                continue
-                            d.registry_label = match["label"]
-                            d.registry_color_key = match["color_key"]
-                            d.registry_person_id = match["person_id"]
-
                 # ---- Record box geometry for the final re-render pass --------
                 # Captured BEFORE drawing (clean coords). The annotated video is
                 # NOT written here: it is written in a second pass after
@@ -521,22 +447,21 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                         "y2": d.y2,
                         "track_id": d.track_id,
                         "confidence": d.confidence,
-                        "registry_label": getattr(d, "registry_label", None),
-                        "registry_color_key": getattr(d, "registry_color_key", None),
-                        "registry_person_id": getattr(d, "registry_person_id", None),
                     }
                     for d in detections
                 ])
 
-                # ---- STAGE 5: draw (modifies frame in place) ----------------
-                frame = draw_detections(frame, detections)
-                frame = draw_hud(frame, person_count=len(detections))
+                if show_window:
+                    # ---- STAGE 5: draw (modifies frame in place) ----------
+                    frame = draw_detections(frame, detections)
+                    frame = draw_hud(frame, person_count=len(detections))
 
-                # ---- Publish latest frame for the main thread to display -----
-                # We store a COPY so the main thread can read it while we move
-                # on to draw the next frame. The lock makes the swap safe.
-                with shared["lock"]:
-                    shared["frames"][name] = frame.copy()
+                    # ---- Publish latest frame for the main thread to show --
+                    # We store a COPY so the display thread can read it while
+                    # we move on to the next frame. Skip this entirely in
+                    # headless runs; the final output video is rendered later.
+                    with shared["lock"]:
+                        shared["frames"][name] = frame.copy()
 
                 frame_index += 1
 
@@ -697,13 +622,11 @@ def main():
     extractor = None
     store = None
     identity = None
-    registry_store = None
     embedders = {}
     locks = {
         "model": threading.Lock(),      # shared model: one forward pass at a time
         "store": threading.Lock(),      # raw store writes (identity-off fallback)
         "identity": threading.Lock(),   # identity: mints ids + writes gallery
-        "registry": threading.Lock(),    # registry lookups share one client
     }
 
     reid_cfg = cfg.get("reid", {})
@@ -722,35 +645,12 @@ def main():
                 ttl=reid_cfg.get("ttl", 300),
                 quality=reid_cfg.get("quality"),
                 max_embeddings_per_track=reid_cfg.get("max_embeddings_per_track", 0),
+                warmup_embeddings=reid_cfg.get("warmup_embeddings", 3),
             )
         print("[main] ReID enabled -> embedding tracked people (no ids assigned).")
 
     store_cfg = cfg.get("store", {})
-    registry_cfg = cfg.get("registry", {})
-    if registry_cfg.get("enabled"):
-        from database.store import PersonVectorStore
-        # Read-only registry lookup against the local Qdrant server. The wrapper
-        # is told not to create collections so this run does not write anything.
-        url = (
-            os.environ.get("QDRANT_URL")
-            or registry_cfg.get("url")
-            or store_cfg.get("url")
-            or None
-        )
-        api_key = os.environ.get("QDRANT_API_KEY") or None
-        path = registry_cfg.get("path", store_cfg.get("path", "qdrant_data"))
-        registry_store = PersonVectorStore(
-            path=path,
-            url=url,
-            api_key=api_key,
-            collection=registry_cfg.get("collection", "registry_gallery"),
-            read_only=True,
-            ensure_collection=False,
-        )
-        backend = url if url else f"LOCAL '{path}'"
-        print(f"[main] Registry lookup ready at {backend} "
-              f"(collection: {registry_store.collection}).")
-    elif store_cfg.get("enabled"):
+    if store_cfg.get("enabled"):
         from database.store import PersonVectorStore
         # URL: env var wins over config.yaml. API key: env only (never committed).
         url = os.environ.get("QDRANT_URL") or store_cfg.get("url") or None
@@ -769,7 +669,7 @@ def main():
     # cameras (global ids are only "global" if every camera decides from the same
     # gallery), and it is the sole writer once enabled.
     id_cfg = cfg.get("identity", {})
-    if (not registry_cfg.get("enabled")) and id_cfg.get("enabled") and store is not None:
+    if id_cfg.get("enabled") and store is not None:
         from identity.service import IdentityService
         identity = IdentityService(
             store,
@@ -777,6 +677,8 @@ def main():
             top_k=id_cfg.get("top_k", 10),
             bank_size=id_cfg.get("bank_size", 20),
             min_score_gap=id_cfg.get("min_score_gap", 0.03),
+            rerank_cfg=id_cfg.get("rerank"),
+            verification_cfg=id_cfg.get("verification"),
         )
         print("[main] Identity Service enabled -> assigning GLOBAL ids.")
 
@@ -796,8 +698,7 @@ def main():
         t = threading.Thread(
             target=process_video,
             args=(name, path, detector, crop_saver, embedders.get(name), store,
-                  identity, registry_store, registry_cfg, locks, cfg, shared,
-                  stop_event, run_id),
+                  identity, locks, cfg, shared, stop_event, run_id),
             name=name,
         )
         t.start()

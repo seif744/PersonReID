@@ -25,8 +25,10 @@ import cv2
 # The colour we draw when there is NO track id yet (plain detection). Green.
 BOX_COLOR = (0, 255, 0)          # BGR = green
 TEXT_COLOR = (0, 0, 0)           # BGR = black (drawn on the coloured label patch)
-BOX_THICKNESS = 2                # line thickness in pixels
+BOX_THICKNESS = 3                # line thickness in pixels
 FONT = cv2.FONT_HERSHEY_SIMPLEX  # a built-in OpenCV font
+LABEL_FONT_SCALE = 1.0           # id/GID label size (was 0.5)
+LABEL_THICKNESS = 2              # id/GID label stroke weight (was 1)
 
 # A fixed palette of distinct, bright BGR colours. Each track id is mapped to
 # one of these so the SAME person keeps the SAME colour frame to frame, which
@@ -64,14 +66,12 @@ def draw_detections(frame, detections):
     too, just so the calling code reads naturally.
     """
     for det in detections:
-        # Colour by GLOBAL id when we have one, so the same person keeps the same
-        # colour ACROSS cameras (that's the whole point of ReID). Fall back to the
-        # registry person id / label, then the per-camera track id, then green.
-        ident = getattr(det, "registry_person_id", None)
-        if ident is None:
-            ident = getattr(det, "registry_color_key", None)
-        if ident is None:
-            ident = det.global_id if det.global_id is not None else det.track_id
+        # Colour by REID id when we have one, so the same person keeps the same
+        # colour ACROSS cameras (that's the whole point of ReID). Fall back to
+        # the per-camera track id, then green.
+        ident = (det.reid_id if det.reid_id is not None
+                 else det.global_id if det.global_id is not None
+                 else det.track_id)
         color = color_for_id(ident)
 
         # 1) The rectangle. cv2.rectangle needs the two opposite corners:
@@ -84,12 +84,11 @@ def draw_detections(frame, detections):
             BOX_THICKNESS,
         )
 
-        # 2) The text label. Prefer the registry name when present, then the
-        #    GLOBAL id, else just the track id ("ID 3  0.87"), else "person".
-        registry_label = getattr(det, "registry_label", None)
-        if registry_label is not None:
-            label = (f"{registry_label}  ID{det.track_id}"
-                     if det.track_id is not None else f"{registry_label}")
+        # 2) The text label. Prefer the cross-camera REID id, else the legacy
+        #    global id, else just the track id ("ID 3  0.87"), else "person".
+        if det.reid_id is not None:
+            label = (f"REID {det.reid_id}  ID{det.track_id}"
+                     if det.track_id is not None else f"REID {det.reid_id}")
         elif det.global_id is not None:
             label = (f"GID {det.global_id}  ID{det.track_id}"
                      if det.track_id is not None else f"GID {det.global_id}")
@@ -100,13 +99,14 @@ def draw_detections(frame, detections):
 
         # Measure how big that text will be, so we can draw a filled
         # background patch behind it -- otherwise the text can be unreadable.
-        (text_w, text_h), baseline = cv2.getTextSize(label, FONT, 0.5, 1)
+        (text_w, text_h), baseline = cv2.getTextSize(
+            label, FONT, LABEL_FONT_SCALE, LABEL_THICKNESS)
 
         # Draw the filled label background just ABOVE the box's top-left corner.
         cv2.rectangle(
             frame,
-            (det.x1, det.y1 - text_h - baseline - 4),  # top-left of patch
-            (det.x1 + text_w, det.y1),                 # bottom-right of patch
+            (det.x1, det.y1 - text_h - baseline - 6),  # top-left of patch
+            (det.x1 + text_w + 4, det.y1),             # bottom-right of patch
             color,
             thickness=-1,   # -1 means "fill the rectangle solid"
         )
@@ -115,11 +115,11 @@ def draw_detections(frame, detections):
         cv2.putText(
             frame,
             label,
-            (det.x1, det.y1 - baseline - 2),  # bottom-left anchor of the text
+            (det.x1 + 2, det.y1 - baseline - 3),  # bottom-left anchor of the text
             FONT,
-            0.5,             # font scale (size)
+            LABEL_FONT_SCALE,
             TEXT_COLOR,
-            1,               # text thickness
+            LABEL_THICKNESS,
             cv2.LINE_AA,     # anti-aliased = smoother-looking text
         )
 

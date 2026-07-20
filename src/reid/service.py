@@ -41,7 +41,7 @@ from detector import crop_person   # shared "box -> safe crop" primitive
 
 class TrackEmbedder:
     def __init__(self, extractor, interval=10, ttl=300, quality=None,
-                 max_embeddings_per_track=0):
+                 max_embeddings_per_track=0, warmup_embeddings=5):
         """
         extractor : a ReIDExtractor (loaded once, reused).
         interval  : recompute a track's embedding every N frames (>=1).
@@ -58,11 +58,17 @@ class TrackEmbedder:
                     (occluded / degraded) frames of the same person, and much less
                     CPU. Must be >= identity.reconcile.min_tracklet_observations
                     so reconciliation still has enough views to match on.
+        warmup_embeddings : re-embed a fresh track on each of its first N
+                    successful embeddings before falling back to `interval`.
+                    This gives the identity service multiple early chances to
+                    compare a new track_id against the existing gallery before
+                    the track settles on the wrong identity.
         """
         self.extractor = extractor
         self.interval = max(1, interval)
         self.ttl = ttl
         self.max_per_track = max(0, int(max_embeddings_per_track or 0))
+        self.warmup_embeddings = max(1, int(warmup_embeddings or 1))
         quality = quality or {}
         self.quality_enabled = quality.get("enabled", False)
         self.min_crop_width = quality.get("min_width", 24)
@@ -127,7 +133,8 @@ class TrackEmbedder:
             # entering the gallery, and saves the forward passes.
             capped = (self.max_per_track > 0 and entry is not None
                       and entry.get("count", 0) >= self.max_per_track)
-            is_due = entry is None or (frame_index - entry["frame"]) >= self.interval
+            warmup = entry is not None and entry.get("count", 0) < self.warmup_embeddings
+            is_due = entry is None or warmup or (frame_index - entry["frame"]) >= self.interval
 
             if capped or not is_due:
                 if entry is not None:
