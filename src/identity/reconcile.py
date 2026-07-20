@@ -112,7 +112,7 @@ def _gather_tracklets(store, run_id):
             data[key]["vectors"].append(np.asarray(vector, dtype=np.float32))
             data[key]["points"].append(p.id)
             data[key]["frames"].append(int(frame))
-            gid = pl.get("global_id")
+            gid = pl.get("reid_id", pl.get("global_id"))
             if gid is not None:
                 data[key]["gids"].add(int(gid))
 
@@ -227,53 +227,67 @@ def reconcile_tracklets(store, threshold, run_id=None,
             roots[find(k)].add(k)
         return roots
 
-    roots = current_roots()
-    root_protos = {r: _cluster_prototype(ms, protos) for r, ms in roots.items()}
-    root_keys = sorted(r for r, p in root_protos.items() if p is not None)
+    # Phase 2 runs in ROUNDS, re-scoring from scratch each round, so a chain of
+    # 3+ mutually-similar fragments (e.g. A's best match is B, but B's own best
+    # match is C, not A) can fully consolidate instead of stalling after one
+    # pass. Each round still requires reciprocal-best (when enabled) using the
+    # CURRENT cluster prototypes -- merging never gets easier than the safety
+    # rule allows, it just gets to re-check after each merge updates the
+    # clusters. A round that merges nothing ends the loop; every merge strictly
+    # reduces the number of roots by one, so this always terminates.
+    while True:
+        roots = current_roots()
+        root_protos = {r: _cluster_prototype(ms, protos) for r, ms in roots.items()}
+        root_keys = sorted(r for r, p in root_protos.items() if p is not None)
 
-    def mergeable_cross(a, b):
-        if conflict(roots[a], roots[b]):
-            return False
-        return any(x[0] != y[0] for x in roots[a] for y in roots[b])
+        def mergeable_cross(a, b):
+            if conflict(roots[a], roots[b]):
+                return False
+            return any(x[0] != y[0] for x in roots[a] for y in roots[b])
 
-    root_scores = {}
-    for i, a in enumerate(root_keys):
-        for b in root_keys[i + 1:]:
-            if not mergeable_cross(a, b):
+        root_scores = {}
+        for i, a in enumerate(root_keys):
+            for b in root_keys[i + 1:]:
+                if not mergeable_cross(a, b):
+                    continue
+                root_scores[(a, b)] = float(root_protos[a] @ root_protos[b])
+
+        def root_score(a, b):
+            return root_scores[(a, b)] if a < b else root_scores[(b, a)]
+
+        best_partner = {}
+        if require_reciprocal_best:
+            for a in root_keys:
+                candidates = [
+                    (root_score(a, b), b) for b in root_keys
+                    if b != a
+                    and ((a, b) in root_scores or (b, a) in root_scores)
+                    and root_score(a, b) >= threshold
+                ]
+                if candidates:
+                    best_partner[a] = max(candidates)[1]
+
+        cross_pairs = []
+        for (a, b), s in root_scores.items():
+            if s < threshold:
                 continue
-            root_scores[(a, b)] = float(root_protos[a] @ root_protos[b])
+            if require_reciprocal_best and not (
+                    best_partner.get(a) == b and best_partner.get(b) == a):
+                continue
+            cross_pairs.append((s, a, b))
 
-    def root_score(a, b):
-        return root_scores[(a, b)] if a < b else root_scores[(b, a)]
+        merged_this_round = False
+        for s, a, b in sorted(cross_pairs, reverse=True):
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                continue
+            if union(ra, rb):
+                log(f"  tracklet reconcile: cross-camera merge {a} + {b} "
+                    f"(cosine {s:.3f})")
+                merged_this_round = True
 
-    best_partner = {}
-    if require_reciprocal_best:
-        for a in root_keys:
-            candidates = [
-                (root_score(a, b), b) for b in root_keys
-                if b != a
-                and ((a, b) in root_scores or (b, a) in root_scores)
-                and root_score(a, b) >= threshold
-            ]
-            if candidates:
-                best_partner[a] = max(candidates)[1]
-
-    cross_pairs = []
-    for (a, b), s in root_scores.items():
-        if s < threshold:
-            continue
-        if require_reciprocal_best and not (
-                best_partner.get(a) == b and best_partner.get(b) == a):
-            continue
-        cross_pairs.append((s, a, b))
-
-    for s, a, b in sorted(cross_pairs, reverse=True):
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            continue
-        if union(ra, rb):
-            log(f"  tracklet reconcile: cross-camera merge {a} + {b} "
-                f"(cosine {s:.3f})")
+        if not merged_this_round:
+            break
 
     final_roots = current_roots()
     all_gids = sorted(

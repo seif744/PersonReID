@@ -56,8 +56,13 @@ class Detection:
     # The GLOBAL person id from Stage 6+ (ReID). Unlike track_id (which is
     # per-camera and resets when the person leaves), this is meant to be the
     # SAME number for the same person across cameras and time. Filled in by the
-    # ReIDService; stays None when ReID is disabled or not yet assigned.
+    # Identity Service; stays None when ReID is disabled or not yet assigned.
     global_id: Optional[int] = None
+
+    # User-facing alias for the cross-camera identity. This is kept in sync with
+    # global_id so downstream code can talk about a "reid id" without changing
+    # the underlying identity pipeline.
+    reid_id: Optional[int] = None
 
     # The ReID APPEARANCE embedding (512-d, L2-normalized) for this detection,
     # attached by TrackEmbedder (Stage 5/6). This is the raw "what they look
