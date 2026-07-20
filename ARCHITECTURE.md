@@ -109,6 +109,15 @@ One per camera (cache keyed by per-camera `track_id`). `process()`:
 - Accepted crops go through **one batched forward pass**; rejected crops keep the
   track's last good vector.
 
+### Registry lookup helper — `main.py`
+After embedding a track, `registry_match_for_embedding()` searches the existing
+`registry_gallery` collection and returns a label payload when the top hit clears
+`registry.threshold`.
+- Read-only by design: it does `search()` only.
+- Uses the same 512-d cosine embeddings as the Registry service.
+- The label formatter prefers `name`, then `employee_id`, and falls back to
+  `person_id` if that is all the payload provides.
+
 ### PersonVectorStore — `src/database/store.py`
 Thin Qdrant wrapper. This is the ONLY gallery the pipeline uses — the identity
 layer both writes to it and searches it.

@@ -8,7 +8,7 @@ step or external service. Produces annotated videos.
 
 > **How it works internally:** see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
 > full data flow, every component, the concurrency model, and design rationale.
-> This README is the *get-it-running* guide.
+
 
 ---
 
@@ -165,6 +165,8 @@ This launches `qdrant/qdrant:latest` and exposes:
 - **gRPC (optional):** `localhost:6334`
 
 Data persists in `./qdrant_storage/` (gitignored), so it survives restarts.
+If you already run Registry against another Qdrant endpoint, point Inference at
+that same server instead.
 
 Verify it's up:
 ```bash
@@ -183,6 +185,9 @@ Out of the box, `config.yaml` already has:
 store:
   enabled: true
   url: http://localhost:6333
+
+store:
+  enabled: false
 ```
 so no extra step is needed for local Docker. If you prefer env-based config,
 create a `.env` file in the project root:
@@ -244,7 +249,7 @@ reid:
   device: cpu                    # "cuda" if you have a GPU
   interval: 10                   # re-embed a track at most every N frames
 
-store:
+registry:
   enabled: true
   url: http://localhost:6333     # shared Qdrant server (see section 4)
 
@@ -333,7 +338,9 @@ That's it — no crop images by default. (Per-person crop images can be turned
 back on with `crops.save: true` in `config.yaml`, e.g. to collect ReID training
 data or visually sanity-check identity assignment.)
 
-The console prints a **RUN SUMMARY** at the end, e.g.:
+Registry lookups do not change the gallery contents during inference. The
+console still prints a **RUN SUMMARY** at the end for the legacy identity path,
+e.g.:
 ```
 Store: 516 observations -> 11 distinct people (reid_ids)
 Cross-camera people: 1
