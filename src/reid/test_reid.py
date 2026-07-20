@@ -16,15 +16,6 @@ In practice ReID sims are positive (crops share "person-ness"); what matters is
 the GAP between the same-person and different-person distributions, not their
 absolute values.
 
---------------------------- GROUND TRUTH & HONESTY ------------------------
-The crop folders are named by PER-CAMERA track id (ByteTrack). So:
-  * SAME-person pairs  = two crops inside the same id_XXXX folder.  (trusted)
-  * DIFF-person pairs  = two crops from different folders OF THE SAME CAMERA.
-We do NOT form cross-camera pairs: we have no cross-camera identity labels, so a
-cross-camera "different" pair might secretly be the same human. Resolving that
-is the Identity Service's job (Phase 7), not this test's. Keeping the test
-intra-camera keeps the ground truth clean.
-
 ------------------------------ HOW TO READ IT -----------------------------
 A healthy osnet_x1_0 (Market-1501) on decent crops should show:
     same-person mean cosine   ~0.6 - 0.9
