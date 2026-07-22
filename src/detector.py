@@ -76,6 +76,16 @@ class Detection:
     # and gallery inserts straightforward.
     crop_quality: Optional[dict] = None
 
+    # Independent-of-the-CNN appearance evidence, attached by TrackEmbedder
+    # alongside the embedding (Stage 5/6). These are MEASUREMENTS, not identity:
+    #   color_descriptor -- a torso colour histogram (see reid/color.py); an
+    #     appearance signal that survives when pose fools the embedding.
+    #   normalized_height -- box height / frame height, a coarse size cue.
+    # Both feed the Track Evidence Layer (identity/evidence.py) so identity
+    # reasoning has evidence beyond a single cosine score. None until embedded.
+    color_descriptor: Optional[np.ndarray] = None
+    normalized_height: Optional[float] = None
+
 
 def crop_person(frame, det, padding=0):
     """

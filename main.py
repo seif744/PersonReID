@@ -414,22 +414,30 @@ def process_video(name, path, detector, crop_saver, embedder, store, identity,
                                 gid = identity.assign(
                                     name, d.track_id, d.embedding, frame_index,
                                     run_id=run_id,
-                                    crop_quality=d.crop_quality)
+                                    crop_quality=d.crop_quality,
+                                    color_descriptor=getattr(d, "color_descriptor", None),
+                                    normalized_height=getattr(d, "normalized_height", None))
                                 d.global_id = gid
                                 d.reid_id = gid
                         processed_here += len(fresh)
                     elif store is not None and fresh:
                         # Identity off: just persist the raw observations.
-                        payloads = [
-                            {
+                        payloads = []
+                        for d in fresh:
+                            pl = {
                                 "camera": name,
                                 "track_id": d.track_id,
                                 "frame": frame_index,
                                 "run_id": run_id,
                                 "crop_quality": d.crop_quality,
                             }
-                            for d in fresh
-                        ]
+                            color = getattr(d, "color_descriptor", None)
+                            if color is not None:
+                                pl["color_descriptor"] = [float(x) for x in color]
+                            nh = getattr(d, "normalized_height", None)
+                            if nh is not None:
+                                pl["normalized_height"] = float(nh)
+                            payloads.append(pl)
                         with locks["store"]:
                             store.add_many([d.embedding for d in fresh], payloads)
                         processed_here += len(fresh)
@@ -728,9 +736,11 @@ def main():
     recon_cfg = id_cfg.get("reconcile", {}) if id_cfg else {}
     if identity is not None and recon_cfg.get("enabled"):
         from identity.reconcile import reconcile_tracklets
+        # threshold=None -> auto-calibrate from this run's own cross-camera
+        # score distribution (see reconcile.py) instead of a value hand-tuned
+        # on earlier footage. Set identity.reconcile.threshold in config.yaml
+        # to pin a specific value again.
         threshold = recon_cfg.get("threshold")
-        if threshold is None:
-            threshold = id_cfg.get("threshold", 0.85)
         print("[main] Reconciling identities across cameras...")
         reconcile_tracklets(
             store,
@@ -739,7 +749,19 @@ def main():
             same_camera_threshold=recon_cfg.get("same_camera_threshold", 0.90),
             require_reciprocal_best=recon_cfg.get("require_reciprocal_best", True),
             min_tracklet_observations=recon_cfg.get("min_tracklet_observations", 1),
+            fallback_threshold=id_cfg.get("threshold", 0.63),
+            color_min_similarity=recon_cfg.get("color_min_similarity", 0.15),
         )
+
+        # ---- STAGE 7c: learn + report camera transition timing --------------
+        # After identities are settled, learn how long people take to move
+        # between cameras (a fixed layout, so these distributions are stable).
+        # Reported as evidence for future verification; see identity/topology.py.
+        topo_cfg = id_cfg.get("topology", {}) if id_cfg else {}
+        if topo_cfg.get("enabled"):
+            from identity.topology import learn_transitions, summarize_transitions
+            model = learn_transitions(store, run_id=run_id)
+            summarize_transitions(model, log=print)
 
     # ---- Final render: annotated videos with the reconciled global ids ------
     # Done AFTER reconciliation so the same person carries the same GID (and

@@ -145,6 +145,21 @@ identity:
     require_reciprocal_best: true      # merge a pair only if they are each other's best
                                        # match -- stops look-alike over-merging on
                                        # weak/out-of-domain models. See reconcile.py.
+    # CNN-INDEPENDENT colour veto (Track Evidence Layer). Two tracklets are never
+    # merged if BOTH carry a torso-colour descriptor (see reid/color.py) and their
+    # histogram intersection is below this -- a red shirt is not a blue shirt,
+    # whatever the embedding says. Colour can only BLOCK a merge, never create one
+    # (false-merge bias). Lenient by default so lighting shift doesn't cause false
+    # splits; raise it if look-alikes in different colours still merge. 0.0 = off.
+    color_min_similarity: 0.15
+
+  # Camera topology (Stage 7c). After identities are reconciled, LEARN how long
+  # people take to move between cameras (the layout is fixed, so these are stable)
+  # and report them. This is observational evidence for now -- it does not itself
+  # merge or split identities (see identity/topology.py for why gating on it is
+  # deferred). Safe to leave on; it only reads the gallery and logs.
+  topology:
+    enabled: true
 
 display:
   show_window: false         # true = live OpenCV windows; false = headless

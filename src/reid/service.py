@@ -37,6 +37,7 @@ import cv2
 import numpy as np
 
 from detector import crop_person   # shared "box -> safe crop" primitive
+from reid.color import torso_color_histogram   # CNN-independent colour cue
 
 
 class TrackEmbedder:
@@ -165,8 +166,15 @@ class TrackEmbedder:
         # One batched forward pass for every track due this frame.
         if due:
             embeddings = self.extractor.extract_batch([c for _, c in due])
-            for (det, _), emb in zip(due, embeddings):
+            frame_h = frame.shape[0]
+            for (det, crop), emb in zip(due, embeddings):
                 det.embedding = emb
+                # CNN-independent evidence, computed from the SAME crop while we
+                # have it (see Detection / evidence.py). Colour: torso histogram.
+                # Height: box height as a fraction of the frame.
+                det.color_descriptor = torso_color_histogram(crop)
+                det.normalized_height = (
+                    (det.y2 - det.y1) / frame_h if frame_h else None)
                 prev = self._cache.get(det.track_id)
                 count = (prev.get("count", 0) if prev else 0) + 1
                 self._cache[det.track_id] = {
