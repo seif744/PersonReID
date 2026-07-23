@@ -48,8 +48,14 @@ crops:
 
 reid:
   enabled: true
-  # OSNet person-ReID weights (dev checkpoint; swap for RandPerson before ship).
-  weights: src/reid/weights/osnet_x1_0_msmt17.pth
+  # OSNet-AIN person-ReID weights: same torchreid OSNet family as before, with
+  # Adaptive Instance Normalization for better generalization to unseen (this
+  # project's out-of-domain CCTV) footage. Swapped from plain osnet_x1_0 because
+  # that model's embeddings weren't discriminative enough on this footage
+  # (same-person cross-camera ~0.72 vs different-person ~0.55 -- too close).
+  # Multi-source domain-generalization checkpoint (trained on Duke+Market+CUHK03,
+  # evaluated on MSMT17 as the unseen domain) from the torchreid Model Zoo.
+  weights: src/reid/weights/osnet_ain_x1_0.pth
   device: cpu                # "cuda" if you have a GPU
   interval: 10               # re-embed a given track at most once every N frames
   ttl: 300                   # forget a track from the cache after N unseen frames
@@ -78,7 +84,12 @@ reid:
     min_aspect: 0.20         # width / height
     max_aspect: 1.20
     max_occlusion_ratio: 0.5 # reject a crop if another person's box covers more
-                             # than this fraction of it (multi-person crop)
+                             # than this fraction of it (multi-person crop).
+                             # Tried tightening to 0.35 after the osnet_ain_x1_0
+                             # swap to fight a rare occlusion-triggered false
+                             # merge, but it measurably hurt overall accuracy
+                             # (97% -> 89%) by rejecting too many real crops.
+                             # Reverted -- see identity.verification comments.
 
 # Vector store (Qdrant). Inference owns this gallery end-to-end: it writes
 # embeddings AND assigns identities against it -- no separate registration step,
@@ -102,7 +113,12 @@ identity:
                              # different people's prototype cosine tops out ~0.57,
                              # genuine cross-video same-person matches reach 0.70-0.80.
                              # Re-measure (see src/identity/demo_identity.py's sweep)
-                             # if the ReID weights or camera domain change.
+                             # if the ReID weights or camera domain change. Left at
+                             # 0.63 after the osnet_ain_x1_0 swap: raising it to 0.68
+                             # alongside the verifier changes below measurably hurt
+                             # accuracy (97% -> 89%) and was reverted. Note this knob
+                             # isn't even on the live decision path while
+                             # verification.enabled is true, below -- see there.
   top_k: 50                  # nearest candidates to consider before deciding
   bank_size: 20              # recent good embeddings kept per global identity
   min_score_gap: 0.03        # best identity must beat runner-up by this much
@@ -125,8 +141,15 @@ identity:
   # See src/identity/verifier.py.
   verification:
     enabled: true
-    accept_threshold: 0.55   # P(same identity) must clear this to accept
-    min_prob_gap: 0.05       # winner must beat runner-up P(same) by this much
+    accept_threshold: 0.55   # P(same identity) must clear this to accept. Tried
+                             # raising to 0.62 after the osnet_ain_x1_0 swap (to
+                             # fight a rare occlusion-triggered false merge), but
+                             # it measurably hurt overall accuracy (97% -> 89%,
+                             # more false splits) and was reverted. The false
+                             # merge is better fixed at its root cause (bad crop
+                             # during occlusion) than by raising the global bar.
+    min_prob_gap: 0.05       # winner must beat runner-up P(same) by this much.
+                             # Same revert as accept_threshold above.
     log_path: logs/verification_decisions.jsonl
 
   # Offline reconciliation (Stage 7b): after ALL cameras finish, rebuild global
@@ -139,27 +162,15 @@ identity:
                              # identity.threshold. Set explicitly here because this
                              # runs independently of the verifier (see verifier.py) --
                              # it must be recalibrated whenever identity.threshold is.
+                             # Left at 0.63 after the osnet_ain_x1_0 swap -- see
+                             # identity.threshold comment above for why the raise
+                             # to 0.68 was reverted.
     same_camera_threshold: 0.90  # stricter merge for fragmented tracks in one camera
     min_tracklet_observations: 3  # a real identity needs >= this many observations;
                                    # shorter tracks are detector noise, not people
     require_reciprocal_best: true      # merge a pair only if they are each other's best
                                        # match -- stops look-alike over-merging on
                                        # weak/out-of-domain models. See reconcile.py.
-    # CNN-INDEPENDENT colour veto (Track Evidence Layer). Two tracklets are never
-    # merged if BOTH carry a torso-colour descriptor (see reid/color.py) and their
-    # histogram intersection is below this -- a red shirt is not a blue shirt,
-    # whatever the embedding says. Colour can only BLOCK a merge, never create one
-    # (false-merge bias). Lenient by default so lighting shift doesn't cause false
-    # splits; raise it if look-alikes in different colours still merge. 0.0 = off.
-    color_min_similarity: 0.15
-
-  # Camera topology (Stage 7c). After identities are reconciled, LEARN how long
-  # people take to move between cameras (the layout is fixed, so these are stable)
-  # and report them. This is observational evidence for now -- it does not itself
-  # merge or split identities (see identity/topology.py for why gating on it is
-  # deferred). Safe to leave on; it only reads the gallery and logs.
-  topology:
-    enabled: true
 
 display:
   show_window: false         # true = live OpenCV windows; false = headless

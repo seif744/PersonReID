@@ -51,78 +51,22 @@ from collections import defaultdict
 
 import numpy as np
 
-from identity.evidence import (
-    EvidenceConfig,
-    FrameObservation,
-    TrackEvidence,
-    color_similarity,
-)
 
-
-def _proto_sim(pa, pb):
-    """
-    Similarity between two tracklets (or clusters) represented by their MEDOID
-    prototype sets. Each argument is a (P, D) array of L2-normalized prototypes;
-    the score is the best match across every prototype pair -- so a front-view
-    query matches a front-view exemplar even when the tracks' *mean* vectors
-    (blurred across viewpoints) would not. This is the multi-prototype upgrade
-    over the old single-mean cosine. Returns -1.0 when either side has no
-    appearance evidence.
-    """
-    if pa.size == 0 or pb.size == 0:
-        return -1.0
-    return float(np.max(pa @ pb.T))
-
-
-def _cluster_prototype(members, protos):
-    """A cluster's prototype set is the STACK of its members' prototypes, so
-    cross-cluster similarity (via _proto_sim) is the best match over every
-    exemplar either side has seen. Empty -> (0, 0)."""
-    mats = [protos[m] for m in members if protos[m].size]
-    if not mats:
-        return np.empty((0, 0), dtype=np.float32)
-    return np.vstack(mats)
-
-
-def _set_color(members, ev_map):
-    """Observation-weighted mean of members' colour descriptors, renormalized to
-    a histogram. None if no member carries colour (or their sizes disagree) --
-    treated as 'no colour evidence', never as a mismatch."""
-    vecs, weights = [], []
-    for m in members:
-        ev = ev_map.get(m)
-        if ev is None or ev.color_descriptor is None:
-            continue
-        vecs.append(np.asarray(ev.color_descriptor, dtype=np.float32).ravel())
-        weights.append(max(1, ev.observation_count))
-    if not vecs or len({v.shape[0] for v in vecs}) != 1:
+def _prototype(vectors):
+    """Mean of L2-normalized vectors, renormalized -- the id's appearance center."""
+    mat = np.stack(vectors).astype(np.float32)
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    mat = mat / np.clip(norms, 1e-12, None)
+    proto = mat.mean(axis=0)
+    n = np.linalg.norm(proto)
+    if n <= 0:
         return None
-    mat = np.stack(vecs)
-    w = np.asarray(weights, dtype=np.float32)
-    agg = (mat * w[:, None]).sum(axis=0)
-    total = float(agg.sum())
-    if total <= 0:
-        return None
-    return agg / total
+    return proto / n
 
 
 def _spans_disjoint(span_a, span_b):
-    """
-    Cheap pre-filter only: True when two tracklets' (min, max) frame
-    envelopes don't even overlap. NOT sufficient on its own to prove they
-    coexisted -- two tracks can have overlapping envelopes while never
-    sharing an actual frame (e.g. the tracker drops an id and reacquires the
-    same person under a new one; the old track's tail and the new track's
-    head can straddle without ever being simultaneous). Use
-    `_tracks_overlap` for the real physical-exclusion decision.
-    """
+    """True when two same-camera tracklets do not overlap in time."""
     return span_a[1] < span_b[0] or span_b[1] < span_a[0]
-
-
-def _tracks_overlap(frames_a, frames_b):
-    """True when two tracklets were actually observed in a shared frame --
-    i.e. they provably coexisted in the same camera at the same instant."""
-    return not frames_a.isdisjoint(frames_b)
 
 
 def _gather_tracklets(store, run_id):
@@ -133,11 +77,7 @@ def _gather_tracklets(store, run_id):
         vectors: [embedding],
         points: [point ids],
         span: (min_frame, max_frame),
-        frames: frozenset of observed frame numbers,
         gids: {original global ids},
-        quals: [crop_quality dict|None],       # per observation, aligned to vectors
-        colors: [color_descriptor list|None],  # per observation
-        heights: [normalized_height float|None],# per observation
     }.
     """
     data = defaultdict(lambda: {
@@ -145,9 +85,6 @@ def _gather_tracklets(store, run_id):
         "points": [],
         "frames": [],
         "gids": set(),
-        "quals": [],
-        "colors": [],
-        "heights": [],
     })
 
     offset = None
@@ -175,9 +112,6 @@ def _gather_tracklets(store, run_id):
             data[key]["vectors"].append(np.asarray(vector, dtype=np.float32))
             data[key]["points"].append(p.id)
             data[key]["frames"].append(int(frame))
-            data[key]["quals"].append(pl.get("crop_quality"))
-            data[key]["colors"].append(pl.get("color_descriptor"))
-            data[key]["heights"].append(pl.get("normalized_height"))
             gid = pl.get("reid_id", pl.get("global_id"))
             if gid is not None:
                 data[key]["gids"].add(int(gid))
@@ -194,159 +128,32 @@ def _gather_tracklets(store, run_id):
             "vectors": info["vectors"],
             "points": info["points"],
             "span": (min(frames), max(frames)),
-            "frames": frozenset(frames),
-            "frames_list": list(frames),   # per-observation, aligned to vectors
             "gids": info["gids"],
-            "quals": info["quals"],
-            "colors": info["colors"],
-            "heights": info["heights"],
         }
     return out
 
 
-def _build_evidence(key, info, cfg):
-    """Turn one gathered tracklet into a TrackEvidence (the Track Evidence Layer
-    entry point). Reconstructs per-observation FrameObservations from the stored
-    payload fields, so the reconciler reasons over cleaned, multi-prototype
-    track evidence instead of a bag of raw frame vectors."""
-    camera, track_id = key
-    obs = []
-    for i, vec in enumerate(info["vectors"]):
-        obs.append(FrameObservation(
-            frame_index=info["frames_list"][i],
-            camera_id=camera, track_id=track_id,
-            embedding=vec,
-            crop_quality=info["quals"][i],
-            color_descriptor=info["colors"][i],
-            normalized_height=info["heights"][i],
-            point_id=info["points"][i],
-        ))
-    return TrackEvidence.from_observations(obs, cfg)
+def _cluster_prototype(members, protos):
+    return _prototype([protos[m] for m in members])
 
 
-def _otsu_split(scores, bins=256):
-    """
-    Otsu's method: the score that maximizes between-class variance of a
-    histogram split into two groups. Standard for finding the boundary
-    between two modes in a distribution without assuming their shape.
-    Returns None if the scores don't vary enough to bin meaningfully.
-    """
-    scores = np.asarray(scores, dtype=np.float64)
-    lo, hi = scores.min(), scores.max()
-    if hi - lo < 1e-9:
-        return None
-    hist, edges = np.histogram(scores, bins=bins, range=(lo, hi))
-    hist = hist.astype(np.float64)
-    total = hist.sum()
-    idx = np.arange(bins)
-    sum_total = float(np.sum(hist * idx))
-
-    sum_below = 0.0
-    weight_below = 0.0
-    best_variance = -1.0
-    best_bin = None
-    for i in range(bins):
-        weight_below += hist[i]
-        if weight_below == 0:
-            continue
-        weight_above = total - weight_below
-        if weight_above == 0:
-            break
-        sum_below += i * hist[i]
-        mean_below = sum_below / weight_below
-        mean_above = (sum_total - sum_below) / weight_above
-        variance = weight_below * weight_above * (mean_below - mean_above) ** 2
-        if variance > best_variance:
-            best_variance = variance
-            best_bin = i
-    if best_bin is None:
-        return None
-    return float(edges[best_bin + 1])
-
-
-def _calibrate_threshold(pairwise_scores, fallback, min_pairs=6,
-                         lo_bound=0.35, hi_bound=0.92, log=print):
-    """
-    Derive this run's cross-camera match threshold from its OWN score
-    distribution instead of a value hand-tuned on different footage.
-
-    WHY: a fixed cosine threshold only works as long as new video stays in
-    the domain (lighting, camera, compression, ReID checkpoint) the number
-    was measured on -- see verifier.py's w0/w_cosine comment and this
-    project's config.yaml. New footage shifts the whole score distribution,
-    so the fixed number silently stops separating "same person" from
-    "different person" and either misses real matches or over-merges.
-
-    A gallery large enough to have cross-camera pairs at all is a mix of
-    "different people" (low cosine) and "same person, two views" (high
-    cosine) pairs -- Otsu's method finds the boundary between those two
-    modes directly from the data, so it re-anchors itself every run.
-
-    Falls back to `fallback` (the configured/default threshold) when there
-    isn't enough evidence yet (too few pairs) or the split lands somewhere
-    implausible for a ReID cosine score (outside [lo_bound, hi_bound]),
-    which usually means the pairs are all one mode (nothing to split).
-    """
-    if len(pairwise_scores) < min_pairs:
-        log(f"  tracklet reconcile: only {len(pairwise_scores)} cross-camera "
-            f"pairs (< {min_pairs}), using fallback threshold {fallback:.3f}")
-        return fallback
-
-    split = _otsu_split(pairwise_scores)
-    if split is None or not (lo_bound <= split <= hi_bound):
-        log(f"  tracklet reconcile: auto-calibration split "
-            f"({split}) outside plausible range, using fallback "
-            f"threshold {fallback:.3f}")
-        return fallback
-
-    log(f"  tracklet reconcile: auto-calibrated threshold {split:.3f} "
-        f"from {len(pairwise_scores)} cross-camera pairs "
-        f"(fallback would have been {fallback:.3f})")
-    return split
-
-
-def reconcile_tracklets(store, threshold=None, run_id=None,
+def reconcile_tracklets(store, threshold, run_id=None,
                         same_camera_threshold=0.90,
                         require_reciprocal_best=True,
-                        min_tracklet_observations=1, log=print,
-                        fallback_threshold=0.63,
-                        color_min_similarity=0.15,
-                        evidence_config=None):
+                        min_tracklet_observations=1, log=print):
     """
     Rebuild global ids from camera-local tracklets.
 
     It does not trust the existing global_id buckets, because a bad live
     assignment can already contain several people. The tracklet -- one camera's
-    view of one track -- is the unit of evidence, now expressed as a
-    `TrackEvidence` object (the Track Evidence Layer): each tracklet is cleaned
-    (quality-weighted, outlier-pruned) and summarized as a small set of MEDOID
-    prototypes, so matching compares the best of one track's real viewpoints
-    against the best of another's rather than two blurred means.
-
-    threshold : cross-camera match threshold. Pass a float to pin it (the old
-        behaviour). Pass None (the default) to auto-calibrate it from this
-        run's own cross-camera score distribution instead -- see
-        `_calibrate_threshold` -- so a new video's different lighting/camera/
-        compression doesn't require hand-editing a config value.
+    view of one track -- is the unit of evidence.
 
     min_tracklet_observations : a real identity needs sustained observation. A
         tracklet with fewer stored observations than this is treated as detector
         noise / an unusable fragment: it is marked UNIDENTIFIED (its global_id is
         cleared) rather than becoming its own person, so it does not inflate the
         head-count. Its vectors stay in the gallery. 1 = keep everything.
-
-    color_min_similarity : CNN-INDEPENDENT veto. Two tracklets are never merged
-        if BOTH carry a torso-colour descriptor (reid/color.py) and their colour
-        histogram intersection is below this -- someone in a red shirt is not
-        someone in a blue one, no matter how the embedding scores them. Colour
-        can only BLOCK a merge, never create one (respecting the false-merge
-        bias); it is skipped when either side lacks colour. 0.0 disables it.
-
-    evidence_config : optional EvidenceConfig controlling how each tracklet is
-        cleaned/summarized (quality floor, outlier strictness, medoid count).
     """
-    cfg = evidence_config or EvidenceConfig()
-    auto_calibrate = threshold is None
     tracklets = _gather_tracklets(store, run_id)
     all_keys = sorted(tracklets)
 
@@ -364,11 +171,8 @@ def reconcile_tracklets(store, threshold=None, run_id=None,
     if len(keys) < 2:
         return {}
 
-    # Build the Track Evidence Layer's view of each surviving tracklet.
-    ev_map = {k: _build_evidence(k, tracklets[k], cfg) for k in keys}
-    protos = {k: (ev_map[k].prototypes if ev_map[k] is not None
-                  else np.empty((0, 0), dtype=np.float32)) for k in keys}
-    keys = [k for k in keys if protos[k].size]
+    protos = {k: _prototype(tracklets[k]["vectors"]) for k in keys}
+    keys = [k for k in keys if protos[k] is not None]
 
     parent = {k: k for k in keys}
     members = {k: {k} for k in keys}
@@ -384,26 +188,16 @@ def reconcile_tracklets(store, threshold=None, run_id=None,
             for b in set_b:
                 if a[0] != b[0]:
                     continue
-                if _spans_disjoint(tracklets[a]["span"], tracklets[b]["span"]):
-                    continue
-                if _tracks_overlap(tracklets[a]["frames"], tracklets[b]["frames"]):
+                if not _spans_disjoint(tracklets[a]["span"], tracklets[b]["span"]):
                     return True
         return False
-
-    def color_conflict(set_a, set_b):
-        """CNN-independent veto: block a merge when both sides have colour
-        evidence and it clearly disagrees. Missing colour -> no veto."""
-        if color_min_similarity <= 0:
-            return False
-        sim = color_similarity(_set_color(set_a, ev_map), _set_color(set_b, ev_map))
-        return sim != -1.0 and sim < color_min_similarity
 
     def union(a, b):
         ra, rb = find(a), find(b)
         if ra == rb:
             return False
         ma, mb = members[ra], members[rb]
-        if conflict(ma, mb) or color_conflict(ma, mb):
+        if conflict(ma, mb):
             return False
         winner, loser = (ra, rb) if ra < rb else (rb, ra)
         parent[loser] = winner
@@ -411,27 +205,15 @@ def reconcile_tracklets(store, threshold=None, run_id=None,
         members.pop(loser, None)
         return True
 
-    if auto_calibrate:
-        cross_camera_scores = [
-            _proto_sim(protos[a], protos[b])
-            for i, a in enumerate(keys)
-            for b in keys[i + 1:]
-            if a[0] != b[0] and not conflict({a}, {b})
-        ]
-        threshold = _calibrate_threshold(
-            cross_camera_scores, fallback_threshold, log=log)
-    else:
-        threshold = fallback_threshold
-
     # Phase 1: repair same-camera track fragmentation with a higher threshold.
     same_pairs = []
     for i, a in enumerate(keys):
         for b in keys[i + 1:]:
             if a[0] != b[0]:
                 continue
-            if _tracks_overlap(tracklets[a]["frames"], tracklets[b]["frames"]):
+            if not _spans_disjoint(tracklets[a]["span"], tracklets[b]["span"]):
                 continue
-            s = _proto_sim(protos[a], protos[b])
+            s = float(protos[a] @ protos[b])
             if s >= same_camera_threshold:
                 same_pairs.append((s, a, b))
     for s, a, b in sorted(same_pairs, reverse=True):
@@ -456,10 +238,10 @@ def reconcile_tracklets(store, threshold=None, run_id=None,
     while True:
         roots = current_roots()
         root_protos = {r: _cluster_prototype(ms, protos) for r, ms in roots.items()}
-        root_keys = sorted(r for r, p in root_protos.items() if p.size)
+        root_keys = sorted(r for r, p in root_protos.items() if p is not None)
 
         def mergeable_cross(a, b):
-            if conflict(roots[a], roots[b]) or color_conflict(roots[a], roots[b]):
+            if conflict(roots[a], roots[b]):
                 return False
             return any(x[0] != y[0] for x in roots[a] for y in roots[b])
 
@@ -468,7 +250,7 @@ def reconcile_tracklets(store, threshold=None, run_id=None,
             for b in root_keys[i + 1:]:
                 if not mergeable_cross(a, b):
                     continue
-                root_scores[(a, b)] = _proto_sim(root_protos[a], root_protos[b])
+                root_scores[(a, b)] = float(root_protos[a] @ root_protos[b])
 
         def root_score(a, b):
             return root_scores[(a, b)] if a < b else root_scores[(b, a)]

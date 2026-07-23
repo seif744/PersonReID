@@ -72,7 +72,7 @@ Responsibilities
 
 Current model
 
-- OSNet x1.0 MSMT17
+- OSNet-AIN x1.0 (domain-generalization checkpoint)
 
 Output
 
@@ -163,19 +163,33 @@ ByteTrack
 
 Current backbone
 
-OSNet x1.0 MSMT17
+OSNet-AIN x1.0 (multi-source domain-generalization checkpoint: trained on
+DukeMTMC-reID + Market1501 + CUHK03, evaluated on MSMT17)
 
-Previous evaluation
+Previous evaluations
 
-OSNet Market1501
+- OSNet x1.0 MSMT17
+- OSNet x1.0 Market1501
 
 Observed similarity distributions
+
+### OSNet-AIN x1.0 (this project's CCTV footage, 3-video run)
+
+Same person (accepted matches)
+
+mean ~0.79, min 0.53
+
+Different people (rejected candidates)
+
+mean ~0.45, p90 0.59
 
 ### MSMT17
 
 Same person
 
-0.70–0.80
+0.70–0.80 (cross-video); on this project's own out-of-domain CCTV footage,
+this narrowed to ~0.72 vs. ~0.55 for different people — motivating the
+OSNet-AIN swap.
 
 Different people
 
@@ -191,7 +205,7 @@ Different people
 
 0.70–0.83
 
-MSMT17 provides substantially better separation.
+Each swap widened the separation: Market1501 → MSMT17 → OSNet-AIN.
 
 ---
 
@@ -674,7 +688,9 @@ These statistics provide independent evidence to the IdentityService.
 
 Current baseline
 
-OSNet x1.0 MSMT17
+OSNet-AIN x1.0 (adopted; see Embedding section above — swapped from OSNet
+x1.0 MSMT17 for better generalization to this project's out-of-domain CCTV
+footage)
 
 Highest-priority evaluation
 
@@ -682,9 +698,11 @@ LightMBN
 
 Potential future evaluations
 
-- OSNet-AIN
 - EfficientNet-based ReID
 - HRNet
+- CLIP-ReID / SOLIDER (foundation backbones, if OSNet-AIN's separation proves
+  insufficient on new footage — larger change: different embedding
+  dimension, Qdrant schema rebuild, new preprocessing)
 
 Expected benefit from backbone improvements
 
@@ -742,11 +760,11 @@ Automatic camera transition modelling.
 
 ### Priority 7
 
-Evaluate lightweight CNN backbones
+Evaluate lightweight CNN backbones (OSNet-AIN already adopted as the current
+baseline; remaining candidates)
 
 1. LightMBN
-2. OSNet-AIN
-3. EfficientNet-based ReID
+2. EfficientNet-based ReID
 4. HRNet
 
 ---

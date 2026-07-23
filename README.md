@@ -16,9 +16,9 @@ step or external service. Produces annotated videos.
 
 ```mermaid
 flowchart TD
-    CFG(["⚙️ config.yaml / CLI"]) --> A1 & B1
+    CFG(["config.yaml / CLI"]) --> A1 & B1
 
-    subgraph LIVE["🎥 LIVE — one thread per camera, running at the same time"]
+    subgraph LIVE[" LIVE — one thread per camera, running at the same time"]
         direction LR
         subgraph CAM_A["Camera A"]
             direction TB
@@ -48,7 +48,7 @@ flowchart TD
         RECON --> SUMMARY["Print run summary\n(console only)"]
     end
 
-    RENDER --> OUT[("🎬 output_camA.mp4\n🎬 output_camB.mp4\nsame person = same REID\nin BOTH videos")]
+    RENDER --> OUT[(" output_camA.mp4\n output_camB.mp4\nsame person = same REID\nin BOTH videos")]
 
     style CFG fill:#e8eef7,stroke:#4a6fa5,color:#1a1a1a
     style QD fill:#fdf3d7,stroke:#b8860b,color:#1a1a1a,stroke-width:2px
@@ -126,23 +126,25 @@ Two model files are needed:
 | File | How to get it | In a fresh clone? |
 |---|---|---|
 | `yolo11n.pt` (detector) | **Auto-downloaded** by ultralytics on first run | No (gitignored; fetched automatically) |
-| `src/reid/weights/osnet_x1_0_msmt17.pth` (ReID, default) | Committed to the repo | Yes — already present |
+| `src/reid/weights/osnet_ain_x1_0.pth` (ReID, default) | Committed to the repo | Yes — already present |
 
-The default ReID checkpoint is OSNet x1_0 trained on **MSMT17** (set by
-`reid.weights` in `config.yaml`), not the more commonly-referenced Market1501
-checkpoint. On this project's own footage, MSMT17 measurably separates
-same-person from different-person matches better — Market1501 gave same- and
-different-person cosine scores that overlapped in the same 0.70-0.85 range,
-while MSMT17 keeps different people under ~0.57 and genuine matches at
-0.70-0.80 (see [ARCHITECTURE.md §6](ARCHITECTURE.md)). If you ever need to
-re-fetch it: it comes from the official `deep-person-reid` MODEL_ZOO
-(`osnet_x1_0`, trained on MSMT17) — download via `gdown` from the Google Drive
-link on that page and place it at `src/reid/weights/`.
+The default ReID checkpoint is **OSNet-AIN x1_0** (set by `reid.weights` in
+`config.yaml`), the same torchreid OSNet family with Adaptive Instance
+Normalization added for better generalization to unseen camera domains. It
+replaced a plain `osnet_x1_0` (MSMT17) checkpoint whose embeddings weren't
+discriminative enough on this project's out-of-domain CCTV footage
+(same-person cross-camera cosine ~0.72 vs. different-person ~0.55 — too
+close). On this project's footage, the AIN swap measurably widens that gap
+(see [ARCHITECTURE.md §6](ARCHITECTURE.md)). If you ever need to re-fetch it:
+it's the multi-source domain-generalization checkpoint (trained on
+DukeMTMC-reID + Market1501 + CUHK03, evaluated on MSMT17) from the official
+`deep-person-reid` MODEL_ZOO (`osnet_ain_x1_0`) — download via `gdown` from the
+Google Drive link on that page and place it at `src/reid/weights/`.
 
-`src/reid/weights/osnet_x1_0_market1501.pth` is also still present (the
-original default) — swap `reid.weights` back to it if you want to compare, but
-it is **not recommended** for this project's footage given the measured overlap
-above.
+`src/reid/weights/osnet_x1_0_market1501.pth` and `osnet_x1_0_msmt17.pth` are
+also still present (earlier defaults) — swap `reid.weights` back to either if
+you want to compare, but they are **not recommended** for this project's
+footage given the measured improvement above.
 
 ---
 
@@ -245,7 +247,7 @@ tracker:
 
 reid:
   enabled: true
-  weights: src/reid/weights/osnet_x1_0_msmt17.pth
+  weights: src/reid/weights/osnet_ain_x1_0.pth
   device: cpu                    # "cuda" if you have a GPU
   interval: 10                   # re-embed a track at most every N frames
 
@@ -257,7 +259,7 @@ identity:
   enabled: true
   threshold: 0.63                # plain-path cosine acceptance (used only
                                   # when verification.enabled is false) --
-                                  # calibrated for the MSMT17 checkpoint
+                                  # calibrated for the osnet_ain_x1_0 checkpoint
   min_score_gap: 0.03
   rerank:                        # ADR-002 Upgrade 1: camera-aware re-ranking
     enabled: true
@@ -357,7 +359,7 @@ Cross-camera people: 1
 | Symptom | Cause / fix |
 |---|---|
 | `Connection refused` | Qdrant isn't running. `docker compose up -d`, then `curl http://localhost:6333/readyz`. |
-| `Unexpected checkpoint keys dropped` | Wrong/corrupt ReID weights. Re-fetch `osnet_x1_0_msmt17.pth` to `src/reid/weights/`. |
+| `Unexpected checkpoint keys dropped` | Wrong/corrupt ReID weights. Re-fetch `osnet_ain_x1_0.pth` to `src/reid/weights/`. |
 | Hangs on first run for a while | `yolo11n.pt` is downloading; subsequent runs are fast. |
 | Very slow on CPU | Set `source.resize_width: 1280` and/or `source.max_frames` for tests. |
 | "database is locked" | Embedded mode (`store.path`) is single-process. Use the shared Docker server (`store.url`), or stop other runs using the same folder. |

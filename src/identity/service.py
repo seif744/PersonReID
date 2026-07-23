@@ -123,16 +123,10 @@ class IdentityService:
         self._next_global_id = self._initial_next_global_id()
 
     def assign(self, camera: str, track_id: int, embedding, frame_index: int,
-               run_id=None, crop_quality=None, color_descriptor=None,
-               normalized_height=None) -> int:
+               run_id=None, crop_quality=None) -> int:
         """
         Return the global_id for this observation, deciding it if the track is
         new. Also commits the observation to the gallery under that global_id.
-
-        color_descriptor / normalized_height are CNN-independent evidence
-        (see reid/color.py, evidence.py). They are only PERSISTED here (as
-        payload) for the offline Track Evidence Layer to consume during
-        reconciliation; the live sticky decision remains appearance-only.
         """
         key = (camera, track_id)
 
@@ -141,8 +135,7 @@ class IdentityService:
         if key in self._track_to_global:
             gid = self._track_to_global[key]
             gid = self._commit(camera, track_id, embedding, frame_index, gid,
-                               run_id, crop_quality, color_descriptor,
-                               normalized_height)
+                               run_id, crop_quality)
             gid = self._maybe_reassign_track(
                 camera, track_id, embedding, frame_index, run_id, crop_quality, gid)
             return gid
@@ -151,7 +144,7 @@ class IdentityService:
         gid = self._match_or_mint(camera, embedding, frame_index, run_id, crop_quality)
         self._track_to_global[key] = gid
         gid = self._commit(camera, track_id, embedding, frame_index, gid, run_id,
-                           crop_quality, color_descriptor, normalized_height)
+                           crop_quality)
         return gid
 
     def _match_or_mint(self, camera: str, embedding, frame_index: int,
@@ -264,7 +257,7 @@ class IdentityService:
         return gid
 
     def _commit(self, camera, track_id, embedding, frame_index, gid, run_id=None,
-                crop_quality=None, color_descriptor=None, normalized_height=None):
+                crop_quality=None):
         """Store this observation under its global_id (grows the gallery)."""
         key = (camera, run_id, track_id)
         payload = {
@@ -278,13 +271,6 @@ class IdentityService:
             payload["run_id"] = run_id
         if crop_quality is not None:
             payload["crop_quality"] = crop_quality
-        # CNN-independent evidence for the offline Track Evidence Layer. Stored as
-        # a plain list (Qdrant payloads must be JSON-serializable, not ndarray).
-        if color_descriptor is not None:
-            payload["color_descriptor"] = np.asarray(
-                color_descriptor, dtype=np.float32).ravel().tolist()
-        if normalized_height is not None:
-            payload["normalized_height"] = float(normalized_height)
         point_id = self.store.add(embedding, payload)
         self._track_points[key].append(point_id)
         self._track_embeddings[key].append(np.asarray(embedding, dtype=np.float32).ravel())

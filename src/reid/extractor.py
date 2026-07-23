@@ -17,14 +17,17 @@ separate, stateful concern with its own failure modes (camera topology, time
 windows, motion). Mixing the two is how ReID systems rot. Keep this dumb.
 
 --------------------------------- THE MODEL --------------------------------
-OSNet x1_0 (torchreid). We depend ONLY on torchreid's model DEFINITION, not on
-its training machinery -- so this file stays a thin inference path we can later
-re-point at a vendored osnet.py for TensorRT without changing the public API.
+OSNet-AIN x1_0 (torchreid). Same OSNet family as before, with Adaptive Instance
+Normalization layers added for better generalization to unseen (out-of-domain)
+camera footage -- swapped in from plain osnet_x1_0 for exactly that reason. We
+depend ONLY on torchreid's model DEFINITION, not on its training machinery --
+so this file stays a thin inference path we can later re-point at a vendored
+osnet.py for TensorRT without changing the public API.
 
-Embedding dimension is 512. This is a property of the CHECKPOINT (osnet_x1_0's
-feature layer width), not a free choice. It is also the vector size the Qdrant
-collection will use downstream, so if the backbone ever changes, that number
-propagates outward.
+Embedding dimension is 512. This is a property of the CHECKPOINT (osnet_ain_x1_0's
+feature layer width, same as osnet_x1_0), not a free choice. It is also the
+vector size the Qdrant collection will use downstream, so if the backbone ever
+changes to a different width, that number propagates outward.
 
 ------------------------------ PREPROCESSING -------------------------------
 The model was trained on inputs prepared a specific way. Inference MUST match
@@ -71,8 +74,8 @@ import torchreid
 # Model input as (Height, Width). OSNet's canonical person-ReID resolution.
 INPUT_SIZE = (256, 128)
 
-# Embedding width produced by osnet_x1_0's feature layer. Verified against the
-# checkpoint: classifier.weight was (751, 512) -> 512 is the feature dim.
+# Embedding width produced by osnet_ain_x1_0's feature layer -- same 512 width
+# as osnet_x1_0, verified against the checkpoint's classifier.weight shape.
 EMBEDDING_DIM = 512
 
 # ImageNet train-set per-channel statistics, RGB order, on the 0..1 scale.
@@ -83,10 +86,10 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 class ReIDExtractor:
     """
-    Loads OSNet x1_0 once and turns person crops into embeddings.
+    Loads OSNet-AIN x1_0 once and turns person crops into embeddings.
 
     Typical use:
-        extractor = ReIDExtractor(weights="weights/osnet_x1_0_market1501.pth")
+        extractor = ReIDExtractor(weights="weights/osnet_ain_x1_0.pth")
         emb = extractor.extract(person_crop)     # (512,) float32, ||emb|| == 1
     """
 
@@ -107,18 +110,26 @@ class ReIDExtractor:
         # ReID-trained weights below. num_classes here is irrelevant -- it only
         # sizes the classifier head, which we deliberately discard.
         model = torchreid.models.build_model(
-            name="osnet_x1_0",
+            name="osnet_ain_x1_0",
             num_classes=1000,
             loss="softmax",
             pretrained=False,
         )
 
         # Load our checkpoint EXPLICITLY so the load is transparent and owned by
-        # this file (rather than hidden inside a framework helper). The bare
-        # state_dict has no "module." prefix and no wrapper, so we can bind it
-        # directly. The only two keys we DROP are classifier.{weight,bias}: they
-        # are the training-time 751-way identity head, meaningless for features.
-        state_dict = torch.load(weights, map_location="cpu")
+        # this file (rather than hidden inside a framework helper). The only two
+        # keys we DROP are classifier.{weight,bias}: they are the training-time
+        # identity head, meaningless for features.
+        # weights_only=False: PyTorch >=2.6 defaults to weights_only=True, which
+        # rejects the numpy scalars pickled into these legacy torchreid
+        # checkpoints. Safe here -- we only ever point this at checkpoints we
+        # downloaded ourselves from the trusted torchreid Model Zoo.
+        checkpoint = torch.load(weights, map_location="cpu", weights_only=False)
+        # Some Model Zoo checkpoints are the bare state_dict; others (like this
+        # AIN one) are a full training checkpoint wrapping it under "state_dict",
+        # with a "module." prefix left over from DataParallel training.
+        state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+        state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
         model_sd = model.state_dict()
         to_load = {
             k: v for k, v in state_dict.items()
@@ -126,7 +137,7 @@ class ReIDExtractor:
         }
         dropped = [k for k in state_dict if k not in to_load]
         if dropped != ["classifier.weight", "classifier.bias"]:
-            # Anything else missing means the checkpoint doesn't match osnet_x1_0
+            # Anything else missing means the checkpoint doesn't match osnet_ain_x1_0
             # -- fail loud rather than emit garbage embeddings.
             raise RuntimeError(
                 f"Unexpected checkpoint keys dropped: {dropped}. "
