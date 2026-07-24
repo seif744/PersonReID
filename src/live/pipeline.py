@@ -321,3 +321,7 @@ class LivePipeline:
         print(f"    identity: minted={st['minted']} reacquired={st['reacquired']} "
               f"linked={st['linked']} active={st['active_identities']} "
               f"resolved_frames={st['frames_done']}")
+        print(f"    x-camera: attempts={st['xcam_attempts']} linked={st['linked']} "
+              f"rejected[thresh={st['xcam_rej_threshold']} margin={st['xcam_rej_margin']} "
+              f"recip={st['xcam_rej_reciprocal']} topology={st['xcam_rej_topology']}] "
+              f"max_subthreshold_score={st['xcam_max_subthreshold']:.3f}")

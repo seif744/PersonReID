@@ -107,11 +107,19 @@ class IdentityStage(threading.Thread):
         return self.engine.minted
 
     def stats(self):
+        e = self.engine
         return {
-            "minted": self.engine.minted,
-            "reacquired": self.engine.reacquired,       # same-camera cold reactivations
-            "linked": self.engine.linked,               # cross-camera links
-            "active_identities": len(self.engine.store.gids()),
+            "minted": e.minted,
+            "reacquired": e.reacquired,                 # same-camera cold reactivations
+            "linked": e.linked,                         # cross-camera links
+            "active_identities": len(e.store.gids()),
             "fair_dropped": self.fair.dropped,
             "frames_done": self.frames_done,
+            # cross-camera diagnostics
+            "xcam_attempts": e.xcam_attempts,
+            "xcam_rej_threshold": e.xcam_rej_threshold,
+            "xcam_rej_margin": e.xcam_rej_margin,
+            "xcam_rej_reciprocal": e.xcam_rej_reciprocal,
+            "xcam_rej_topology": e.xcam_rej_topology,
+            "xcam_max_subthreshold": e.xcam_max_subthreshold,
         }
