@@ -71,7 +71,8 @@ class LivePipeline:
         tcfg = self.live_cfg.get("topology", {}) or {}
         edges = tcfg.get("edges") or []
         if not tcfg.get("enabled", False) or not edges:
-            print("[live] topology veto: FAIL-OPEN (appearance-only; no edges configured).")
+            print("[live] cross-camera topology veto: OFF (appearance-only; intended, "
+                  "not an error -- enable live.topology with measured transit times to use it).")
             return FailOpenTopology()
         parsed = []
         for e in edges:
@@ -102,6 +103,17 @@ class LivePipeline:
         trk_cfg = self.cfg.get("tracker", {}) or {}
         extractor = ReIDExtractor(weights=reid_cfg["weights"], device=device)
 
+        # LIVE-only pose toggle: the pose ensemble is a SECOND model per frame.
+        # Skipping it ~halves detection cost -> far fewer dropped frames -> stabler
+        # ByteTrack -> less identity fragmentation. Scoped to the live path only via
+        # live.inference.pose_ensemble; the file-batch path (main.py) still reads
+        # detector.pose_ensemble unchanged (regression gate intact).
+        live_pose = self._g("inference", "pose_ensemble", True)
+        pose_cfg = det_cfg.get("pose_ensemble") if live_pose else None
+        if not live_pose:
+            print("[live] pose ensemble DISABLED for the live path "
+                  "(throughput: 1 detection model/frame instead of 2).")
+
         detectors, embedders = {}, {}
         for name, _ in self.sources:
             detectors[name] = PersonDetector(
@@ -109,7 +121,7 @@ class LivePipeline:
                 confidence_threshold=det_cfg["confidence_threshold"],
                 person_class_id=det_cfg["person_class_id"],
                 tracker_config=trk_cfg.get("config", "bytetrack.yaml"),
-                pose_ensemble=det_cfg.get("pose_ensemble"),
+                pose_ensemble=pose_cfg,
             )
             embedders[name] = TrackEmbedder(
                 extractor,
@@ -325,3 +337,7 @@ class LivePipeline:
               f"rejected[thresh={st['xcam_rej_threshold']} margin={st['xcam_rej_margin']} "
               f"recip={st['xcam_rej_reciprocal']} topology={st['xcam_rej_topology']}] "
               f"max_subthreshold_score={st['xcam_max_subthreshold']:.3f}")
+        print(f"    same-cam reacquire: attempts={st['recam_attempts']} "
+              f"ok={st['reacquired']} rejected_below_thr={st['recam_rej_below']} "
+              f"max_rejected_score={st['recam_max_rej']:.3f}  "
+              f"(high rejected_below_thr => fragmentation; same_camera_threshold too strict)")

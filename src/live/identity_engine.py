@@ -223,6 +223,10 @@ class IdentityEngine:
         self.xcam_rej_reciprocal = 0
         self.xcam_rej_topology = 0
         self.xcam_max_subthreshold = 0.0   # highest score rejected for < cross_thr
+        # same-camera reacquisition diagnostics: fragmentation signal
+        self.recam_attempts = 0    # resolves with a same-camera reacquire candidate
+        self.recam_rej_below = 0   # rejected for scoring < same_camera_threshold -> mint
+        self.recam_max_rej = 0.0   # highest score rejected below same_camera_threshold
 
     # ---- public API -------------------------------------------------------
     def assign(self, cam, track_id, embedding, crop_quality, ts, has_fresh_emb):
@@ -321,9 +325,15 @@ class IdentityEngine:
         same_cam = [g for g in scored if cam in self.store.cameras(g)]
         if same_cam:
             best = max(same_cam, key=lambda g: scored[g])
+            self.recam_attempts += 1
             if scored[best] >= self.same_thr:
                 self.reacquired += 1
                 return best
+            # Failed the strict same-camera bar -> this track will (usually) mint a
+            # new id = identity fragmentation. Track how far below we landed so we
+            # can see whether same_camera_threshold is too strict for this footage.
+            self.recam_rej_below += 1
+            self.recam_max_rej = max(self.recam_max_rej, scored[best])
 
         # --- CROSS-CAMERA lane: link the same person across cameras. Lower
         # threshold than same-camera, but a merge only survives if it clears

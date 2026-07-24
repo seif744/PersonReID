@@ -122,4 +122,7 @@ class IdentityStage(threading.Thread):
             "xcam_rej_reciprocal": e.xcam_rej_reciprocal,
             "xcam_rej_topology": e.xcam_rej_topology,
             "xcam_max_subthreshold": e.xcam_max_subthreshold,
+            "recam_attempts": e.recam_attempts,
+            "recam_rej_below": e.recam_rej_below,
+            "recam_max_rej": e.recam_max_rej,
         }
