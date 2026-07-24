@@ -343,7 +343,9 @@ class LivePipeline:
               f"max_rejected_score={st['recam_max_rej']:.3f}  "
               f"(high rejected_below_thr => fragmentation; same_camera_threshold too strict)")
         print(f"    coactive_vetoes={st['coactive_vetoes']}  "
-              f"(co-present same-camera false-merges prevented)")
+              f"(co-present same-camera false-merges prevented)   "
+              f"topology_pruned={st['topology_pruned']}  "
+              f"(impossible cross-camera candidates removed)")
         from live.identity_engine import HIST_LABELS
         lab = " ".join(HIST_LABELS)
         rh = " ".join(f"{n:>4}" for n in st['recam_hist'])

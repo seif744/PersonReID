@@ -237,7 +237,9 @@ class IdentityEngine:
         self.xcam_rej_threshold = 0
         self.xcam_rej_margin = 0
         self.xcam_rej_reciprocal = 0
-        self.xcam_rej_topology = 0
+        self.xcam_rej_topology = 0         # (kept for stats compat; topology now prunes
+                                           #  candidates during gathering, see below)
+        self.topology_pruned = 0           # candidates removed as physically unreachable
         self.xcam_max_subthreshold = 0.0   # highest score rejected for < cross_thr
         # same-camera reacquisition diagnostics: fragmentation signal
         self.recam_attempts = 0    # resolves with a same-camera reacquire candidate
@@ -337,6 +339,10 @@ class IdentityEngine:
                 continue                      # on screen NOW via another track here
             if self.store.same_camera_overlap(gid, cam, ts):
                 continue                      # historical time-overlap in this camera
+            if not self._topology_ok(gid, cam, ts):
+                self.topology_pruned += 1     # physically can't have reached here yet
+                continue                      # -> removes impossible COMPETITORS, so the
+                                              #    reachable true match can win the margin
             s = self.store.score(gid, agg)
             if s is not None:
                 scored[gid] = s
@@ -384,9 +390,10 @@ class IdentityEngine:
                 self.xcam_rej_margin += 1
             elif not self._reciprocal_best_ok(best, agg, cam, ts, best_s):
                 self.xcam_rej_reciprocal += 1
-            elif not self._topology_ok(best, cam, ts):
-                self.xcam_rej_topology += 1
             else:
+                # topology is already enforced during candidate gathering (impossible
+                # candidates are pruned before they can compete), so anything reaching
+                # here is physically reachable.
                 self.linked += 1
                 return best
 
