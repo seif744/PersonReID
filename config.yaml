@@ -264,6 +264,13 @@ live:
     t_batch_ms: 15          # dispatch a batch at max_batch_size OR this timeout
     max_inference_queue: 2
     max_skip_cycles: 2      # scheduler starvation bound (fresh cam not skipped > N cycles)
+    pose_ensemble: false    # LIVE ONLY. false = skip the 2nd (pose) detection model
+                            # per frame -> ~2x detection throughput -> far fewer dropped
+                            # frames -> stabler ByteTrack -> less identity fragmentation.
+                            # The pose model only splits merged 2-people boxes; the
+                            # throughput win matters more while inference is the choke.
+                            # Batch path is unaffected (it reads detector.pose_ensemble).
+                            # Re-enable once Stage 2 batched inference restores headroom.
   identity:
     max_queue: 64           # bound of the identity input queue AND of each
                             # per-camera lane in the anti-starvation fair buffer
