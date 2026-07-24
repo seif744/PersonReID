@@ -10,16 +10,8 @@ render_final_videos), which stays intact (regression gate).
 See the plan/architecture doc for the staged design and the FIXED execution
 rules (priority order, no architectural drift, ByteTrack stop-rule).
 
-Built so far: Stage 0 (capabilities, Frame carrier, decode-backend abstraction --
-CPU done, NVDEC a documented server task), Stage 1 (the full threaded skeleton:
-capture/scheduler/inference/identity/render/writer/pipeline), and Stage 3 (the
-full in-memory identity engine -- active set with prototype/medoid storage,
-same-camera cold reactivation, cross-camera reciprocal-best matching, an
-anti-starvation per-camera fair queue, and a pluggable fail-open topology veto;
-identity_engine.py + priority.py + topology.py, driven by identity_stage.py, with
-NO Qdrant). Still to come: Stage 2 GPU batched detector+ReID throughput, Stage 4
-NVDEC decode, Stage 5 ops/metrics hardening, Stage 6 acceptance scripts.
-
-The Stage-3 engine is thread-free and deterministic; its logic is validated on
-synthetic embeddings in tests/live/ (run tests/live/run_stage3_acceptance.py).
+Stage 0 provides the foundation only: capability detection, the Frame carrier,
+and the decode-backend abstraction (CPU implemented; NVDEC is a documented
+server task). Later stages add capture/scheduler/inference/identity/render/
+writer/pipeline.
 """
