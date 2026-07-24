@@ -50,6 +50,19 @@ def _unit(vec):
     return v / n
 
 
+# Score histogram bins for tuning thresholds from REAL data (not guesses):
+# index of a cosine score in [<.5, .5-.6, .6-.7, .7-.8, .8-.9, >=.9].
+HIST_LABELS = ["<.5", ".5-.6", ".6-.7", ".7-.8", ".8-.9", ".9+"]
+
+
+def _bin6(s):
+    if s < 0.5:
+        return 0
+    if s >= 0.9:
+        return 5
+    return int(s * 10) - 4      # 0.5->1, 0.6->2, 0.7->3, 0.8->4
+
+
 class ActiveIdentitySet:
     """In-memory gallery of live identities (handoff §5: prototypes/medoids).
 
@@ -231,6 +244,10 @@ class IdentityEngine:
         self.recam_rej_below = 0   # rejected for scoring < same_camera_threshold -> mint
         self.recam_max_rej = 0.0   # highest score rejected below same_camera_threshold
         self.coactive_vetoes = 0   # co-present false-merges prevented (same cam, live now)
+        # best-candidate score histograms (all attempts) for data-driven threshold
+        # tuning -- see HIST_LABELS. recam = same-camera reacquire, xcam = cross-camera.
+        self.recam_hist = [0] * 6
+        self.xcam_hist = [0] * 6
 
     # ---- public API -------------------------------------------------------
     def assign(self, cam, track_id, embedding, crop_quality, ts, has_fresh_emb):
@@ -333,6 +350,7 @@ class IdentityEngine:
         if same_cam:
             best = max(same_cam, key=lambda g: scored[g])
             self.recam_attempts += 1
+            self.recam_hist[_bin6(scored[best])] += 1
             if scored[best] >= self.same_thr:
                 self.reacquired += 1
                 return best
@@ -358,6 +376,7 @@ class IdentityEngine:
             # metrics summary can tell us WHY cross-camera linking isn't happening
             # (topology veto vs threshold-too-high vs ambiguous vs look-alike).
             self.xcam_attempts += 1
+            self.xcam_hist[_bin6(best_s)] += 1
             if best_s < self.cross_thr:
                 self.xcam_rej_threshold += 1
                 self.xcam_max_subthreshold = max(self.xcam_max_subthreshold, best_s)

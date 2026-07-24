@@ -343,3 +343,10 @@ class LivePipeline:
               f"(high rejected_below_thr => fragmentation; same_camera_threshold too strict)")
         print(f"    coactive_vetoes={st['coactive_vetoes']}  "
               f"(co-present same-camera false-merges prevented)")
+        from live.identity_engine import HIST_LABELS
+        lab = " ".join(HIST_LABELS)
+        rh = " ".join(f"{n:>4}" for n in st['recam_hist'])
+        xh = " ".join(f"{n:>4}" for n in st['xcam_hist'])
+        print(f"    score histograms (best candidate per attempt)   bins: {lab}")
+        print(f"      same-cam reacquire: {rh}   (pick same_camera_threshold below the same-person cluster)")
+        print(f"      cross-camera:       {xh}   (pick cross_camera_threshold below the true-match cluster)")

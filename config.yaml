@@ -276,8 +276,15 @@ live:
                             # per-camera lane in the anti-starvation fair buffer
     assign_latency_budget_ms: 5
     min_evidence_obs: 3     # evidence gate before ASSIGNED (never assign on 1st obs)
-    same_camera_threshold: 0.90   # same-camera lane: cold reactivation of a dropped
-                                  # then re-acquired track (strict; ported)
+    same_camera_threshold: 0.85   # same-camera lane: cold reactivation of a dropped
+                                  # then re-acquired track. Lowered 0.90 -> 0.85 from
+                                  # A100 run #4: 29/42 same-camera reacquisitions failed
+                                  # JUST under 0.90 (max 0.898) -> the person minted a new
+                                  # id instead of reclaiming theirs = fragmentation, which
+                                  # also crowds cross-camera matching. Co-present false
+                                  # merges are separately blocked by the co-active veto, so
+                                  # lowering this is safe for the on-screen case. Tune from
+                                  # the same-cam reacquire histogram in the run summary.
     cross_camera_threshold: 0.60  # cross-camera lane: link the same person across cams.
                                   # Lowered 0.63 -> 0.60 from A100 run #2: 9 real
                                   # cross-camera matches landed just under 0.63
