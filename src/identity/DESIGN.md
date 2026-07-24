@@ -60,10 +60,11 @@ memoryless** by design, and that is exactly why it must not decide identity:
    model only produces the appearance signal.
 
 3. **Separation of concerns / testability.** The model is a pure function: same
-   input → same output, trivially unit-testable and swappable (Market-1501 dev
-   weights today, RandPerson weights tomorrow) with **zero** change to identity
-   logic. Fuse the two and every model swap risks the identity behavior, and
-   neither can be tested in isolation.
+   input → same output, trivially unit-testable and swappable — proven in
+   practice by the Market1501 → MSMT17 → OSNet-AIN checkpoint swaps, each a
+   one-line change with **zero** change to identity logic. Fuse the two and
+   every model swap risks the identity behavior, and neither can be tested in
+   isolation.
 
 4. **It has no write authority.** Assigning an id is a *stateful mutation* of a
    shared global namespace. A stateless feature extractor running in parallel

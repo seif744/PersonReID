@@ -91,7 +91,7 @@ to `crops/<camera>/id_<track>/`. Not required by the pipeline — the embedder
 crops in-memory — it's for debugging / collecting ReID training data.
 
 ### ReIDExtractor — `src/reid/extractor.py`
-OSNet-x1_0, loaded once and shared. Pipeline per crop: BGR→RGB → resize
+OSNet-AIN-x1_0, loaded once and shared. Pipeline per crop: BGR→RGB → resize
 **256×128** → `/255` → ImageNet mean/std → forward in `eval()` mode (512-d
 feature) → **L2-normalize**. Unit vectors ⇒ cosine similarity == dot product.
 Preprocessing is pinned to match training or embeddings silently degrade.
@@ -187,12 +187,16 @@ change to the calling code**.
 - Features: cosine score, re-ranked score, `log1p(observation_count)`, frames
   since last same-camera sighting, and a crop-quality scalar.
 - Weights are calibrated so cosine ≈ 0.63 sits near the decision boundary --
-  measured directly on this project's footage with the current
-  `osnet_x1_0_msmt17` checkpoint: genuinely different people's prototype
-  cosine tops out ~0.48-0.57, genuine cross-camera/cross-video matches reach
-  0.70-0.80. **Re-measure and re-anchor these weights whenever the ReID
-  checkpoint or camera domain changes** — they are specific to this model's
-  score distribution, not a universal constant.
+  measured on this project's footage with the `osnet_x1_0_msmt17` checkpoint.
+  After swapping to `osnet_ain_x1_0` (see §6), the decision log
+  (`logs/verification_decisions.jsonl`) showed accepted matches averaging
+  cosine ~0.79 (min 0.53), rejected candidates averaging ~0.45 (p90 0.59) --
+  a wider, cleaner gap. Raising `accept_threshold`/`min_prob_gap` (0.55→0.62,
+  0.05→0.08) to exploit that margin was tried but measurably hurt overall
+  accuracy (97% -> 89%, more false splits) and was reverted; left at 0.55/0.05.
+  **Re-measure and re-anchor these weights whenever the ReID checkpoint or
+  camera domain changes** — they are specific to this model's score distribution, not a
+  universal constant.
 
 ### Legacy reconcile_tracklets — `src/identity/reconcile.py`
 Runs once after all cameras finish, with the full gallery visible. Rebuilds
@@ -263,7 +267,9 @@ than the same person** (a genuine same-person cross-camera match at cosine
 distributions overlapped, so **no single cosine threshold was simultaneously
 correct** — raising it fixed false merges but created false splits, and vice
 versa. Switching to an OSNet/MSMT17 checkpoint substantially widened that gap
-on this footage (see §6) — but the underlying risk (some future camera/domain
+on this footage, and a later swap to OSNet-AIN (`osnet_ain_x1_0`, same family,
+added Adaptive Instance Normalization for domain generalization) widened it
+further still (see §6) — but the underlying risk (some future camera/domain
 reintroducing overlap) is exactly what re-ranking and verification exist to
 guard against, not something a single "right" checkpoint permanently solves.
 
@@ -304,21 +310,35 @@ The pipeline is correct; the **embedding model is the ceiling** on this domain.
   **cosine 0.65–0.76** (even after denoising via prototype averaging), while
   *different* people reached **0.70–0.83** — the distributions **overlapped**,
   so no fixed threshold could perfectly separate them.
-- **Current default (OSNet/MSMT17)**: re-measured on the same footage, this
-  checkpoint separates the two cases much better — different people's
-  prototype cosine tops out **~0.48–0.57**, genuine same-person cross-video
-  matches reach **~0.70–0.80**. A clean gap exists, and `identity.threshold` /
-  `identity.reconcile.threshold` / the verifier's weights are calibrated
-  against it (§3, §7). This is a config choice, not an architecture change —
-  MSMT17's more diverse camera/lighting conditions during training happen to
-  generalize better to this CCTV domain than Market1501's more controlled
-  benchmark setup.
+- **Previous default (OSNet/MSMT17)**: re-measured on the same footage, this
+  checkpoint separated the two cases better than Market1501 — different
+  people's prototype cosine topped out **~0.48–0.57**, genuine same-person
+  cross-video matches reached **~0.70–0.80** — but on this project's actual
+  CCTV footage the two clusters still ran close enough (~0.72 vs. ~0.55) that
+  a domain-generalization backbone was worth trying.
+- **Current default (OSNet-AIN, `osnet_ain_x1_0`)**: same OSNet family and
+  512-d embedding, with Adaptive Instance Normalization added specifically to
+  generalize to unseen camera domains — a near-drop-in swap (same torchreid
+  API, same 256×128 preprocessing). Measured from the decision log on this
+  project's 3-video run: accepted (same-person) matches average cosine
+  **~0.79** (min 0.53), rejected candidates average **~0.45** (p90 0.59) — a
+  wider, cleaner gap than MSMT17's. Despite that margin, raising
+  `identity.threshold`/`identity.reconcile.threshold` (to 0.68) and the
+  verifier's `accept_threshold`/`min_prob_gap` (to 0.62/0.08) to exploit it
+  was tried and reverted -- it measurably hurt end-to-end accuracy (97% ->
+  89%) via more false splits, so all four stay at their MSMT17-era values
+  (0.63 / 0.55 / 0.05) for now (§3, §7). The occlusion crop-quality gate
+  (`max_occlusion_ratio`) was also tried tighter (0.35) to fight a rare
+  occlusion-triggered false merge and reverted for the same reason -- see §7.
 - **This is footage-and-checkpoint-specific, not solved in general.** A
   different deployment (different cameras, lighting, clothing diversity)
-  could easily reintroduce distribution overlap even with MSMT17. Re-run
-  `identity/demo_identity.py`'s sweep (or the direct prototype-similarity
-  check used to validate this swap) whenever you point this at new footage,
-  and re-anchor the verifier's weights and thresholds if the gap changes.
+  could easily reintroduce distribution overlap even with OSNet-AIN. Re-run
+  `identity/demo_identity.py`'s sweep (or inspect
+  `logs/verification_decisions.jsonl` directly) whenever you point this at
+  new footage, and re-anchor the verifier's weights and thresholds if the gap
+  changes. If overlap persists, escalate to a foundation backbone (CLIP-ReID /
+  SOLIDER) — that's a bigger change (different embedding dimension, Qdrant
+  schema rebuild, new preprocessing) done as a separate step.
   That's why re-ranking and verification exist as a safety net on top of raw
   cosine, and why the verifier logs decisions instead of claiming to be a
   finished, trained classifier.
@@ -343,7 +363,7 @@ The pipeline is correct; the **embedding model is the ceiling** on this domain.
 | `detector.confidence_threshold` | 0.4 | drop weak detections |
 | `tracker.config` | bytetrack.yaml | tracker |
 | `crops.interval` | 10 | save a crop every N frames |
-| `reid.weights` | osnet_x1_0_msmt17.pth | ReID checkpoint — recalibrate everything below if this changes (§6) |
+| `reid.weights` | osnet_ain_x1_0.pth | ReID checkpoint — recalibrate everything below if this changes (§6) |
 | `reid.interval` / `ttl` | 10 / 300 | re-embed cadence / cache eviction |
 | `reid.quality.max_occlusion_ratio` | 0.5 | reject multi-body crops |
 | `store.enabled` | true | the pipeline's own gallery — always on for the default flow |

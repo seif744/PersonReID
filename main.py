@@ -27,6 +27,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import yaml   # reads our config.yaml (installed alongside ultralytics)
 import cv2
 
@@ -35,7 +36,7 @@ import cv2
 # is the single source root. Run `python main.py` from the project root.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
-from video_source import VideoSource
+from video_source import VideoSource, is_stream_path
 from detector import PersonDetector
 from drawing import draw_detections, draw_hud
 from crop_saver import CropSaver
@@ -141,6 +142,33 @@ def get_screen_size():
         return size
     except Exception:
         return (1920, 1080)
+
+
+def gui_available():
+    """
+    True only if OpenCV can actually OPEN a window in this environment.
+
+    Why a subprocess: when the display/Qt backend can't initialise (a headless
+    box, or a WSL without a working X server -- the classic "Could not load the
+    Qt platform plugin xcb"), OpenCV does not raise a catchable Python error --
+    it ABORTS the whole process (SIGABRT / core dump). So we cannot probe it
+    in-process with try/except. We probe in a throwaway child process instead:
+    if the child aborts, we learn windows are unusable WITHOUT taking down the
+    real pipeline, and fall back to headless (the saved videos still render).
+    """
+    # No DISPLAY on Linux => definitely no windows; skip the (slow) probe.
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        return False
+    try:
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import cv2; cv2.namedWindow('__probe__'); cv2.destroyAllWindows()"],
+            capture_output=True, timeout=60,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 # Video file extensions we recognise when scanning a directory.
@@ -338,6 +366,123 @@ def render_final_videos(jobs, cfg, shared, store, run_id):
 
 
 # =============================================================================
+# PHASE 1 (LIVE mode only): record raw streams to disk, no ML.
+# Decoupling capture from processing is what lets N cameras run without any
+# real-time constraint -- reading+writing frames is cheap and keeps up, and the
+# heavy detect/track/embed/reconcile happens OFFLINE afterwards on the recording
+# (Phase 2 = the ordinary batch pipeline). One recorder thread per stream; an
+# optional raw monitoring window runs on the main thread.
+# =============================================================================
+def capture_stream(name, url, rec_path, fps, stream_cfg, shared, stop_event):
+    """
+    Read `url` and write every decoded frame to `rec_path` at `fps`, until
+    stop_event is set (q / Ctrl-C) or the source ends. NO detection/embedding --
+    just decode + write, so it keeps up with real time for several cameras.
+    Publishes the latest frame to `shared` for the optional monitoring window.
+
+    drop_stale is OFF here: we want a faithful, full-frame-rate recording, not
+    the freshest-only frames the live display wanted. Reconnect stays ON so a
+    transient RTSP hiccup doesn't end the capture.
+    """
+    tag = f"[{name}]"
+    writer = None
+    n = 0
+    try:
+        with VideoSource(
+            path=url,
+            stop_event=stop_event,
+            reconnect_attempts=stream_cfg.get("reconnect_attempts", 5),
+            reconnect_backoff=stream_cfg.get("reconnect_backoff", 1.0),
+            drop_stale=False,
+        ) as cam:
+            print(f"{tag} Recording stream -> {rec_path}")
+            for frame in cam.frames():
+                if stop_event.is_set():
+                    break
+                if writer is None:
+                    h, w = frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(rec_path, fourcc, fps, (w, h))
+                writer.write(frame)
+                n += 1
+                # Publish for the monitoring window (a copy so the display thread
+                # can read it while we move on).
+                with shared["lock"]:
+                    shared["frames"][name] = frame.copy()
+                if n % 60 == 0:
+                    print(f"{tag} recording... {n} frames")
+    except Exception as e:
+        print(f"{tag} ERROR while recording: {e}")
+    finally:
+        if writer is not None:
+            writer.release()
+        with shared["lock"]:
+            shared["done"].add(name)
+        print(f"{tag} Recorded {n} frames -> {rec_path}")
+
+
+def run_capture_phase(sources, cfg):
+    """
+    Record every STREAM source to recorded_<name>.mp4 (files pass through). Runs
+    one recorder thread per stream plus an optional raw monitoring window on the
+    main thread; returns {name: recorded_path} for the streams. Blocks until the
+    user stops it ('q' in a window, or Ctrl-C) or every stream ends on its own.
+    """
+    stream_sources = [(n, p) for n, p in sources if is_stream_path(p)]
+    if not stream_sources:
+        return {}
+
+    stream_cfg = cfg.get("source", {}).get("stream", {}) or {}
+    out_cfg = cfg.get("output", {}) or {}
+    disp_cfg = cfg.get("display", {}) or {}
+    # Recording fps: streams report unreliable CAP_PROP_FPS, so we use a fixed
+    # config fps for the recording. Phase 2 re-renders at display.output_fps
+    # regardless (same as any file), so what matters is that every frame is kept.
+    fps = float(out_cfg.get("fps_default", disp_cfg.get("output_fps", 20.0)))
+
+    shared = {"lock": threading.Lock(), "frames": {}, "done": set()}
+    stop_event = threading.Event()
+
+    recorded = {}
+    threads = []
+    for name, url in stream_sources:
+        rec_path = f"recorded_{name}.mp4"
+        recorded[name] = rec_path
+        t = threading.Thread(
+            target=capture_stream,
+            args=(name, url, rec_path, fps, stream_cfg, shared, stop_event),
+            name=f"rec-{name}",
+        )
+        t.start()
+        threads.append(t)
+
+    names = [n for n, _ in stream_sources]
+    want_window = disp_cfg.get("show_window", True)
+    print(f"[capture] Recording {len(names)} stream(s): {', '.join(names)}. "
+          f"Press 'q' in a window or Ctrl-C to stop and start processing.")
+    try:
+        if want_window and gui_available():
+            # Reuse the monitoring window loop: it shows the raw frames and quits
+            # on 'q'. total_videos = number of streams so it exits when all end.
+            run_display(names, cfg, shared, stop_event, len(names))
+        else:
+            if want_window:
+                print("[capture] No usable GUI display -> recording HEADLESS. "
+                      "Press Ctrl-C to stop.")
+            # Headless: wait for the streams (which only end on stop / failure).
+            for t in threads:
+                t.join()
+    except KeyboardInterrupt:
+        print("\n[capture] Ctrl-C -> stopping capture...")
+
+    stop_event.set()
+    for t in threads:
+        t.join(timeout=10)
+    cv2.destroyAllWindows()
+    return recorded
+
+
+# =============================================================================
 # The WORKER: runs the whole pipeline for ONE video, on its own thread.
 # It does NOT touch any window. It only:
 #   - reads frames, detects+tracks, saves crops, draws boxes, and
@@ -500,6 +645,11 @@ def run_display(names, cfg, shared, stop_event, total_videos):
 
     screen_w, screen_h = get_screen_size()
     created = set()   # which windows we've already created + sized
+    # Some environments (headless servers, a WSL without WSLg/X) can't open a
+    # GUI window -- cv2 raises then. Rather than crash the whole run (which would
+    # also lose the saved videos), we fall back to a headless wait: the session
+    # keeps running and is stopped with Ctrl-C, which still finalizes outputs.
+    gui_ok = True
 
     while True:
         # Take a quick snapshot of the latest frames under the lock.
@@ -507,26 +657,40 @@ def run_display(names, cfg, shared, stop_event, total_videos):
             frames = dict(shared["frames"])
             done = set(shared["done"])
 
-        for name, frame in frames.items():
-            if name not in created:
-                # Size each window to fit the screen. When there are several
-                # cameras, give each a slice of the screen width so they fit
-                # side by side (0.9 / N), keeping aspect ratio.
-                h, w = frame.shape[:2]
-                frac = 0.9 / max(1, total_videos)
-                fit = min(1.0, (screen_w * frac) / w, (screen_h * 0.9) / h)
-                scale = fit * window_scale
-                cv2.namedWindow(name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-                cv2.resizeWindow(name, max(1, int(w * scale)), max(1, int(h * scale)))
-                created.add(name)
+        if gui_ok:
+            try:
+                for name, frame in frames.items():
+                    if name not in created:
+                        # Size each window to fit the screen. When there are several
+                        # cameras, give each a slice of the screen width so they fit
+                        # side by side (0.9 / N), keeping aspect ratio.
+                        h, w = frame.shape[:2]
+                        frac = 0.9 / max(1, total_videos)
+                        fit = min(1.0, (screen_w * frac) / w, (screen_h * 0.9) / h)
+                        scale = fit * window_scale
+                        cv2.namedWindow(name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+                        cv2.resizeWindow(name, max(1, int(w * scale)), max(1, int(h * scale)))
+                        created.add(name)
 
-            cv2.imshow(name, frame)
+                    cv2.imshow(name, frame)
 
-        # waitKey both refreshes the windows AND reads the keyboard. 'q' quits.
-        if (cv2.waitKey(30) & 0xFF) == ord("q"):
-            print("[display] 'q' pressed -> stopping all videos.")
-            stop_event.set()
-            break
+                # waitKey both refreshes the windows AND reads the keyboard. 'q' quits.
+                if (cv2.waitKey(30) & 0xFF) == ord("q"):
+                    print("[display] 'q' pressed -> stopping all videos.")
+                    stop_event.set()
+                    break
+            except cv2.error as e:
+                gui_ok = False
+                print(f"[display] Live windows unavailable ({e}); continuing "
+                      f"HEADLESS. Press Ctrl-C to stop and finalize the saved "
+                      f"videos.")
+
+        if not gui_ok:
+            # No windows: can't read 'q', so wait for stop (Ctrl-C sets it) or
+            # for every source to finish on its own.
+            if stop_event.is_set():
+                break
+            time.sleep(0.03)
 
         # Exit once every video has finished. (We've already shown whatever
         # frames each produced; a video that failed instantly just won't have
@@ -536,7 +700,7 @@ def run_display(names, cfg, shared, stop_event, total_videos):
             break
 
     # Keep the final frames up until a key is pressed, so nothing vanishes.
-    if created and not stop_event.is_set():
+    if gui_ok and created and not stop_event.is_set():
         print("[display] Press any key in a window to close.")
         cv2.waitKey(0)
 
@@ -561,6 +725,12 @@ def parse_args():
              f"({'/'.join(e.lstrip('.') for e in VIDEO_EXTS)}). "
              "Overrides config source.videos.",
     )
+    p.add_argument(
+        "--mode", choices=["auto", "live", "batch"], default=None,
+        help="Override live.run.mode. auto (default; live if a source is a URL) | "
+             "live (v5 real-time src/live/ pipeline) | batch (file pipeline). "
+             "Handy for testing the live pipeline without editing config.yaml.",
+    )
     return p.parse_args()
 
 
@@ -584,6 +754,61 @@ def main():
     print(f"[main] Preparing {len(sources)} video(s) from {src_origin}: "
           f"{', '.join(n for n, _ in sources)}")
     print(f"[main] Run id: {run_id}")
+
+    # ---- v5 live-pipeline routing (Stage 0) --------------------------------
+    # The new real-time streaming pipeline lives in src/live/ and is built in
+    # stages. `live.run.mode` selects the path; a capability report is logged so
+    # the chosen device/decode is visible even on a headless server. This block
+    # does NOT change file-batch behaviour: mode `auto` (default) keeps today's
+    # logic (record-then-batch for URLs, batch for files); `batch` forces the
+    # file path; `live` is reserved for the v5 pipeline (Stage 1+).
+    live_cfg = cfg.get("live", {}) or {}
+    run_cfg = live_cfg.get("run", {}) or {}
+    run_mode = args.mode or run_cfg.get("mode", "auto")   # --mode overrides config
+    try:
+        from live.capabilities import capability_report
+        cap = capability_report(
+            requested_device=run_cfg.get("device", "auto"),
+            requested_nvdec=(live_cfg.get("capture", {}) or {}).get("nvdec", "auto"),
+        )
+        print(f"[main] Capability report: {cap}")
+    except Exception as e:
+        print(f"[main] (capability report unavailable: {e})")
+
+    if run_mode == "live":
+        # v5 real-time pipeline (src/live/). Handles files OR streams; produces
+        # output_<cam>.mp4 live. Separate from the file-batch + record-then-batch
+        # paths below (which `auto`/`batch` still use).
+        from live.pipeline import LivePipeline
+        LivePipeline(sources, cfg).run()
+        print("[main] All done.")
+        return
+
+    # A run is "live" if ANY source is a stream URL (rtsp://, http://, ...).
+    # LIVE mode is a two-phase design that AVOIDS any real-time processing
+    # constraint (so N cameras never build up latency):
+    #   Phase 1 (here): cheaply RECORD each raw stream to recorded_<name>.mp4
+    #     with NO ML -- just decode + write, which easily keeps up with several
+    #     cameras -- while showing an optional raw monitoring window. Stop with
+    #     'q' or Ctrl-C.
+    #   Phase 2 (the rest of main): run the EXACT SAME batch pipeline as a video
+    #     file run on those recordings -> detect/track/embed/assign/reconcile/
+    #     re-render -> output_<name>.mp4 at full fps and full quality.
+    # A files-only run skips Phase 1 entirely and is byte-identical to before.
+    # `run.mode: batch` forces the file path even if a URL was passed.
+    live_run = (run_mode != "batch") and any(is_stream_path(p) for _, p in sources)
+    recorded_paths = {}    # name -> recorded_<name>.mp4 (stream sources only)
+    if live_run:
+        recorded_paths = run_capture_phase(sources, cfg)
+        if not any(os.path.exists(p) for p in recorded_paths.values()):
+            print("[main] No stream frames were recorded; nothing to process.")
+            return
+        # Converge with the file path: each stream source becomes its recording;
+        # any file sources in the same run stay as-is. From here on `sources`
+        # are all local files and Phase 2 is an ordinary batch run.
+        sources = [(name, recorded_paths.get(name, path)) for name, path in sources]
+        print("[main] Capture finished -> processing the recording(s) offline "
+              "through the full pipeline (no real-time constraint).")
 
     if crop_cfg.get("save"):
         clear_directory(crop_cfg.get("dir", "crops"))
@@ -671,6 +896,12 @@ def main():
     id_cfg = cfg.get("identity", {})
     if id_cfg.get("enabled") and store is not None:
         from identity.service import IdentityService
+        # NOTE: the online decision core stays OFF here (online_cfg=None). In the
+        # record-then-batch design every run that reaches this point processes
+        # local files (recordings or user files), so identity is owned by the
+        # SAME sticky live-assign + offline reconcile as a video-file run -- that
+        # is what gives the saved MP4 its file-quality ids. (The online core in
+        # service.py remains available/gated for a future live-preview need.)
         identity = IdentityService(
             store,
             threshold=id_cfg.get("threshold", 0.85),
@@ -679,6 +910,7 @@ def main():
             min_score_gap=id_cfg.get("min_score_gap", 0.03),
             rerank_cfg=id_cfg.get("rerank"),
             verification_cfg=id_cfg.get("verification"),
+            online_cfg=None,
         )
         print("[main] Identity Service enabled -> assigning GLOBAL ids.")
 
@@ -705,13 +937,20 @@ def main():
         threads.append(t)
 
     # ---- Display on the main thread (or just wait, if windows are off) -------
+    # Ctrl-C is caught so a deliberately-stopped live session still finalizes:
+    # we set stop_event and fall through to the reconcile + re-render below,
+    # producing the saved videos just like pressing 'q' does.
     show_window = disp_cfg.get("show_window", True)
-    if show_window:
-        run_display([n for n, *_ in jobs], cfg, shared, stop_event, len(jobs))
-    else:
-        # Headless: nothing to show, just wait for all videos to finish.
-        for t in threads:
-            t.join()
+    try:
+        if show_window:
+            run_display([n for n, *_ in jobs], cfg, shared, stop_event, len(jobs))
+        else:
+            # Headless: nothing to show, just wait for all videos to finish.
+            for t in threads:
+                t.join()
+    except KeyboardInterrupt:
+        print("\n[main] Interrupted (Ctrl-C) -> stopping all sources and "
+              "finalizing outputs...")
 
     # Ask workers to stop (if the user quit) and wait for them to wind down.
     stop_event.set()
@@ -749,6 +988,25 @@ def main():
         render_final_videos(jobs, cfg, shared, store, run_id)
 
     print_run_summary(store, jobs, cfg, run_id=run_id)
+
+    # ---- Clean up raw stream recordings (LIVE mode only) --------------------
+    # The recordings were just an intermediate to reach the batch pipeline. By
+    # default we delete them once output_<name>.mp4 exists; keep them with
+    # output.keep_recording: true (e.g. to re-process or audit the raw capture).
+    if recorded_paths:
+        keep = cfg.get("output", {}).get("keep_recording", False)
+        for name, rec_path in recorded_paths.items():
+            if not os.path.exists(rec_path):
+                continue
+            if keep:
+                print(f"[main] Keeping raw recording: {rec_path}")
+            else:
+                try:
+                    os.remove(rec_path)
+                    print(f"[main] Removed raw recording: {rec_path}")
+                except OSError as e:
+                    print(f"[main] Could not remove {rec_path}: {e}")
+
     print("[main] All done.")
 
 
