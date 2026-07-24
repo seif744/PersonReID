@@ -187,7 +187,8 @@ class LivePipeline:
             max_frame_staleness_ms=float(self._g("capture", "max_frame_staleness_ms", 100)),
         )
         inference = InferenceStage(detectors, embedders, inference_queue,
-                                   identity_queue, self.stop_event)
+                                   identity_queue, self.stop_event,
+                                   max_workers=int(self._g("inference", "max_workers", 0)))
         limits_cfg = self.live_cfg.get("limits", {}) or {}
         identity = IdentityStage(
             identity_queue, render_queues, self.stop_event,

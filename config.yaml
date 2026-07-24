@@ -261,9 +261,16 @@ live:
     max_frame_staleness_ms: 100   # scheduler skips frames older than this
   inference:
     max_batch_size: 8       # forced to 1 on CPU (device-aware)
-    t_batch_ms: 15          # dispatch a batch at max_batch_size OR this timeout
+    t_batch_ms: 40          # dispatch a batch at max_batch_size OR this timeout.
+                            # Raised 15->40 for Stage 2: a ~40ms window gathers a
+                            # frame from EACH camera into one batch so they can be
+                            # processed CONCURRENTLY (one worker per camera). Still
+                            # well under one frame period; adds negligible latency.
     max_inference_queue: 2
     max_skip_cycles: 2      # scheduler starvation bound (fresh cam not skipped > N cycles)
+    max_workers: 0          # Stage 2 inference parallelism. 0 = one worker per camera
+                            # (recommended). Each worker owns a camera's detector +
+                            # ByteTrack; the shared ReID extractor is lock-serialised.
     pose_ensemble: false    # LIVE ONLY. false = skip the 2nd (pose) detection model
                             # per frame -> ~2x detection throughput -> far fewer dropped
                             # frames -> stabler ByteTrack -> less identity fragmentation.
