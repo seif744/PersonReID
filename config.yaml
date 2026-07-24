@@ -324,24 +324,22 @@ live:
   # _camera_name_from_source), so the mapping is: camera1=cam_224, camera2=cam_219,
   # camera3=cam_213 (chokepoint), camera4=cam_206.
   topology:
-    # Cross-camera physical-impossibility veto -- DISABLED (appearance-only).
-    # A transit-time veto needs a trustworthy MINIMUM seconds per hop, and we do
-    # NOT have measured values. Guessing them backfires: a too-high min false-splits
-    # a real cross-camera match (exactly the bug that made cross-camera linking
-    # never fire), and people move between cameras at variable speed, so no single
-    # hardcoded min is correct. So cross-camera merges are guarded by APPEARANCE +
-    # reciprocal-best + runner-up margin + the same-camera overlap veto -- which is
-    # also the handoff's fail-open default until real topology data exists.
-    enabled: false
-    # To RE-ENABLE later with MEASURED times: set enabled: true and add edges as
-    # [cam_a, cam_b, min_transit_sec] (undirected; multi-hop auto-summed along the
-    # shortest path). Co-visible/overlapping pairs use 0 (no time veto). Template
-    # for this site (cam_213 is the sole chokepoint in/out of cam_206):
-    #   edges:
-    #     - [cam_224, cam_219, 0]   # same room, co-visible -> no min
-    #     - [cam_224, cam_213, ?]   # measure
-    #     - [cam_219, cam_213, ?]   # measure
-    #     - [cam_213, cam_206, ?]   # measure
+    # Cross-camera physical-impossibility veto -- ENABLED with MEASURED transit
+    # times (minimum seconds to physically move between adjacent cameras). During
+    # cross-camera matching a candidate identity is PRUNED if less than the
+    # shortest-path minimum has elapsed since it was last seen (a person can't
+    # teleport): this both cuts cross-camera false-merges AND removes impossible
+    # competitors so the reachable true match can win the runner-up margin.
+    # Multi-hop pairs auto-sum along the shortest path through the cam_213
+    # chokepoint (e.g. cam_206 <-> cam_224 = 3 + 2 = 5s). cam_224 & cam_219 are
+    # co-visible (same room, overlapping views) -> 0: no time constraint (the
+    # co-active veto handles co-presence). Undirected. Format: [a, b, min_sec].
+    enabled: true
+    edges:
+      - [cam_224, cam_219, 0]   # same room, co-visible (overlapping views)
+      - [cam_224, cam_213, 2]   # room -> chokepoint (measured)
+      - [cam_219, cam_213, 2]   # room -> chokepoint (measured)
+      - [cam_213, cam_206, 3]   # chokepoint <-> cam 4 (measured; only way in/out)
   limits:
     max_active_identities: 200  # LRU cap on the in-memory active set (bounds memory)
     active_ttl: 300         # SECONDS unseen before a live identity is evicted from
