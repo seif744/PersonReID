@@ -341,3 +341,5 @@ class LivePipeline:
               f"ok={st['reacquired']} rejected_below_thr={st['recam_rej_below']} "
               f"max_rejected_score={st['recam_max_rej']:.3f}  "
               f"(high rejected_below_thr => fragmentation; same_camera_threshold too strict)")
+        print(f"    coactive_vetoes={st['coactive_vetoes']}  "
+              f"(co-present same-camera false-merges prevented)")

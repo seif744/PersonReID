@@ -63,6 +63,22 @@ def main():
     g_bob, _ = _resolve_track(eng, "cam_a", 13, bob, t0=60.0)
     c.ok(g_bob != g_alice, f"different person is not reacquired as alice ({g_bob})")
 
+    # 5) CO-ACTIVE VETO (the A100 bug): two tracks on screen at the SAME time in
+    #    one camera must NOT share an id even when the span-bracket check misses
+    #    (the 2nd track resolves just AFTER the 1st track's span end -- the timing
+    #    hole that merged two co-present people). Worst case: identical appearance.
+    eng2 = IdentityEngine(min_evidence_obs=3, same_camera_threshold=0.90,
+                          coactive_window_sec=2.0)
+    twin_look = person(7)
+    ga = _resolve_track(eng2, "cam_z", 1, twin_look, t0=1.0)[0]   # A: span ends ~1.4
+    # B resolves at ts 1.6-2.0, i.e. AFTER A's last span point -> span check misses,
+    # but A is still live (seen 0.2s ago) -> co-active veto must fire.
+    gb = _resolve_track(eng2, "cam_z", 2, twin_look, t0=1.6)[0]
+    c.ok(not eng2.store.same_camera_overlap(ga, "cam_z", 2.0),
+         "span-bracket check MISSES the co-present pair (the original bug)")
+    c.ok(gb != ga, f"co-active veto: co-present tracks get DISTINCT ids ({gb} != {ga})")
+    c.ok(eng2.coactive_vetoes >= 1, "co-active veto fired (prevented the false merge)")
+
     c.done()
 
 

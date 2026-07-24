@@ -125,4 +125,5 @@ class IdentityStage(threading.Thread):
             "recam_attempts": e.recam_attempts,
             "recam_rej_below": e.recam_rej_below,
             "recam_max_rej": e.recam_max_rej,
+            "coactive_vetoes": e.coactive_vetoes,
         }

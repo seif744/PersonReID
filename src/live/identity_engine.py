@@ -199,7 +199,7 @@ class IdentityEngine:
     def __init__(self, min_evidence_obs=3, same_camera_threshold=0.90,
                  cross_camera_threshold=0.63, accept_margin=0.03,
                  bank_size=20, active_ttl_sec=300.0, max_active_identities=200,
-                 topology=None):
+                 topology=None, coactive_window_sec=2.0):
         self.min_obs = max(1, int(min_evidence_obs))
         self.same_thr = float(same_camera_threshold)
         self.cross_thr = float(cross_camera_threshold)
@@ -207,6 +207,9 @@ class IdentityEngine:
         self.active_ttl_sec = float(active_ttl_sec)
         self.max_active = int(max_active_identities)
         self.topology = topology or FailOpenTopology()
+        # A gid seen via another assigned track in the same camera within this
+        # many seconds is treated as CO-PRESENT (on screen now) -> hard veto.
+        self.coactive_window = float(coactive_window_sec)
 
         self.store = ActiveIdentitySet(bank_size=bank_size)
         self._tracks = {}          # (cam, track_id) -> track state dict
@@ -227,6 +230,7 @@ class IdentityEngine:
         self.recam_attempts = 0    # resolves with a same-camera reacquire candidate
         self.recam_rej_below = 0   # rejected for scoring < same_camera_threshold -> mint
         self.recam_max_rej = 0.0   # highest score rejected below same_camera_threshold
+        self.coactive_vetoes = 0   # co-present false-merges prevented (same cam, live now)
 
     # ---- public API -------------------------------------------------------
     def assign(self, cam, track_id, embedding, crop_quality, ts, has_fresh_emb):
@@ -256,7 +260,7 @@ class IdentityEngine:
 
         if st["status"] == "provisional":
             if st["obs"] >= self.min_obs:
-                self._resolve(cam, st, ts)
+                self._resolve(cam, st, ts, key)
         else:                                   # assigned -> reinforce, stay sticky
             self._reinforce(cam, st, unit, ts)
         return st["gid"]
@@ -276,14 +280,14 @@ class IdentityEngine:
             return None
         return _unit(st["sum"] / st["w"])
 
-    def _resolve(self, cam, st, ts):
+    def _resolve(self, cam, st, ts, key):
         """Evidence gate reached: match-or-mint on the quality-weighted aggregate,
         then seed the active set with this track's evidence + span."""
         agg = self._aggregate(st)
         if agg is None:
             st["obs"] = self.min_obs - 1        # degenerate; wait for more
             return
-        gid = self._match(cam, agg, ts)
+        gid = self._match(cam, agg, ts, key)
         if gid is None:
             gid = self._mint()
         st["gid"] = gid
@@ -298,7 +302,7 @@ class IdentityEngine:
         self.store.add_observation(st["gid"], cam, unit, ts)
 
     # ---- matching (two-lane, false-merge-conservative) --------------------
-    def _match(self, cam, agg, ts):
+    def _match(self, cam, agg, ts, exclude_key):
         """Return a gid to reuse, or None to mint. Mirrors the proven
         service.py::_two_lane_match on the in-memory active set.
 
@@ -306,13 +310,16 @@ class IdentityEngine:
         dropped track re-entering its own camera is the common case and gets a
         strict threshold), then the CROSS-camera lane (lower threshold, but
         guarded by a runner-up margin + reciprocal-best + topology). Uncertain ->
-        None (mint). The same-camera time-overlap HARD veto is applied while
-        gathering candidates, so a co-present identity is never a candidate.
+        None (mint). The same-camera co-presence HARD veto is applied while
+        gathering candidates, so an identity on screen NOW via another track (or
+        historically overlapping) is never a candidate -- one body can't be two.
         """
         scored = {}
         for gid in self.store.gids():
+            if self._gid_coactive(gid, cam, ts, exclude_key):
+                continue                      # on screen NOW via another track here
             if self.store.same_camera_overlap(gid, cam, ts):
-                continue                      # co-present here -> a different body
+                continue                      # historical time-overlap in this camera
             s = self.store.score(gid, agg)
             if s is not None:
                 scored[gid] = s
@@ -365,6 +372,24 @@ class IdentityEngine:
                 return best
 
         return None
+
+    def _gid_coactive(self, gid, cam, ts, exclude_key):
+        """HARD co-presence veto that does NOT depend on span-bracket timing:
+        True if `gid` is on screen in `cam` RIGHT NOW via another assigned track
+        seen within `coactive_window` seconds. One body cannot be two live tracks
+        at once, so a resolving track must never take a gid another co-present
+        track already holds. This is the fix for two co-present people being
+        merged into one reid: the old span check (t0 < ts < t1) silently missed
+        it whenever the other track's span lagged the resolving track's timestamp
+        (which happens constantly under frame drops / interleaved processing)."""
+        for key, s in self._tracks.items():
+            if key == exclude_key or key[0] != cam:
+                continue
+            if (s["status"] == "assigned" and s["gid"] == gid
+                    and abs(ts - s["last_ts"]) <= self.coactive_window):
+                self.coactive_vetoes += 1
+                return True
+        return False
 
     def _reciprocal_best_ok(self, gid_star, agg, cam, ts, our_score):
         """Reciprocal-best guard (ported from service.py::_reciprocal_best_ok):
