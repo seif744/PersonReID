@@ -38,6 +38,7 @@ from live.capture import CaptureThread
 from live.scheduler import BatchScheduler
 from live.inference import InferenceStage
 from live.identity_stage import IdentityStage
+from live.topology import FailOpenTopology, GraphTopology
 from live.render import RenderStage
 from live.writer import WriterStage
 
@@ -51,10 +52,42 @@ class LivePipeline:
         self.threads = []                 # (name, thread) in start order
         self.captures = []                # CaptureThread refs (for finished/reconnect)
         self.writers = []                 # WriterStage refs (finalize on shutdown)
+        self.renderers = []               # RenderStage refs (metrics)
+        # metrics wiring (populated in run(); read by the reporter)
+        self._m = {}                      # {slots, inference_queue, identity_queue,
+                                          #  render_queues, writer_queues, scheduler,
+                                          #  inference, identity, max_batch}
+        self._peaks = {"inference_q": 0, "identity_q": 0, "writer_q": 0}
+        self._t_start = None
 
     # ---- config helpers ----------------------------------------------------
     def _g(self, group, key, default):
         return (self.live_cfg.get(group, {}) or {}).get(key, default)
+
+    def _build_topology(self):
+        """Build the cross-camera veto from the live.topology config block.
+        Returns a GraphTopology when enabled with edges, else FailOpenTopology
+        (the fail-open invariant: no data -> nothing is ever blocked)."""
+        tcfg = self.live_cfg.get("topology", {}) or {}
+        edges = tcfg.get("edges") or []
+        if not tcfg.get("enabled", False) or not edges:
+            print("[live] topology veto: FAIL-OPEN (appearance-only; no edges configured).")
+            return FailOpenTopology()
+        parsed = []
+        for e in edges:
+            try:
+                a, b, sec = e[0], e[1], float(e[2])
+                parsed.append((str(a), str(b), sec))
+            except (TypeError, IndexError, ValueError):
+                print(f"[live] topology: skipping malformed edge {e!r} "
+                      f"(expected [cam_a, cam_b, min_transit_sec]).")
+        if not parsed:
+            return FailOpenTopology()
+        topo = GraphTopology(edges=parsed)
+        cams = ", ".join(sorted(topo.known()))
+        print(f"[live] topology veto ACTIVE: {len(parsed)} edge(s) over "
+              f"{len(topo.known())} camera(s) [{cams}]; any other camera is fail-open.")
+        return topo
 
     def run(self):
         cap = capability_report(self._g("run", "device", "auto"),
@@ -96,7 +129,7 @@ class LivePipeline:
         max_writer_q = int(out_cfg.get("max_writer_queue", 16))
         fps = float(out_cfg.get("fps_default", 20))
 
-        slots, render_queues = {}, {}
+        slots, render_queues, writer_queues = {}, {}, {}
         inference_queue = DropOldestQueue(int(self._g("inference", "max_inference_queue", 2)))
         identity_queue = DropOldestQueue(int(self._g("identity", "max_queue", 64)))
 
@@ -120,7 +153,9 @@ class LivePipeline:
             render_q = DropOldestQueue(max_writer_q)
             writer_q = DropOldestQueue(max_writer_q)
             render_queues[name] = render_q
+            writer_queues[name] = writer_q
             renderer = RenderStage(name, render_q, writer_q, self.stop_event)
+            self.renderers.append(renderer)
             writer = WriterStage(
                 name, writer_q, self.stop_event,
                 out_path=f"output_{name}.mp4", fps=fps,
@@ -141,12 +176,20 @@ class LivePipeline:
         )
         inference = InferenceStage(detectors, embedders, inference_queue,
                                    identity_queue, self.stop_event)
+        limits_cfg = self.live_cfg.get("limits", {}) or {}
         identity = IdentityStage(
             identity_queue, render_queues, self.stop_event,
             min_evidence_obs=int(self._g("identity", "min_evidence_obs", 3)),
             same_camera_threshold=float(self._g("identity", "same_camera_threshold", 0.90)),
             cross_camera_threshold=float(self._g("identity", "cross_camera_threshold", 0.63)),
             accept_margin=float(self._g("identity", "accept_margin", 0.03)),
+            bank_size=int(self._g("identity", "bank_size", 20)),
+            active_ttl_sec=float(limits_cfg.get("active_ttl", 300)),
+            max_active_identities=int(limits_cfg.get("max_active_identities", 200)),
+            max_per_lane=int(self._g("identity", "max_queue", 64)),
+            # Cross-camera physical-impossibility veto, built from the
+            # live.topology config block (fail-open if absent/disabled/empty).
+            topology=self._build_topology(),
         )
         # shared consumers start before captures
         self.threads.append(("identity", identity))
@@ -155,22 +198,37 @@ class LivePipeline:
         for capt in self.captures:
             self.threads.append((capt.name, capt))
 
+        # ---- stash refs for the metrics reporter ----------------------------
+        self._m = {
+            "slots": slots, "inference_queue": inference_queue,
+            "identity_queue": identity_queue, "render_queues": render_queues,
+            "writer_queues": writer_queues, "scheduler": scheduler,
+            "inference": inference, "identity": identity, "max_batch": bs,
+        }
+
         # ---- start (consumers already ordered before captures) --------------
         for _, t in self.threads:
             t.start()
 
         # ---- supervise until stop -------------------------------------------
         max_dur = float(self._g("run", "max_duration_sec", 0) or 0)
-        started = time.monotonic()
+        log_interval = float((self.live_cfg.get("metrics", {}) or {}).get("log_interval_sec", 10) or 0)
+        self._t_start = time.monotonic()
+        last_log = self._t_start
         try:
             while not self.stop_event.is_set():
+                self._track_peaks()
                 if all(c.finished for c in self.captures):
                     print("[live] all sources ended -> draining and finalizing...")
                     time.sleep(1.0)     # let in-flight frames flush through
                     break
-                if max_dur > 0 and (time.monotonic() - started) >= max_dur:
+                if max_dur > 0 and (time.monotonic() - self._t_start) >= max_dur:
                     print(f"[live] max_duration_sec={max_dur:g} reached -> stopping.")
                     break
+                now = time.monotonic()
+                if log_interval > 0 and (now - last_log) >= log_interval:
+                    self._report(now - self._t_start, final=False)
+                    last_log = now
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("\n[live] Ctrl-C -> stopping and finalizing outputs...")
@@ -210,4 +268,56 @@ class LivePipeline:
                 t.join(timeout=5)
         for w in self.writers:
             w.join(timeout=10)     # writer flushes queue + releases the MP4
+        if self._t_start is not None:
+            self._report(time.monotonic() - self._t_start, final=True)
         print("[live] shutdown complete.")
+
+    # ---- metrics -----------------------------------------------------------
+    def _track_peaks(self):
+        m = self._m
+        if not m:
+            return
+        self._peaks["inference_q"] = max(self._peaks["inference_q"], len(m["inference_queue"]))
+        self._peaks["identity_q"] = max(self._peaks["identity_q"], len(m["identity_queue"]))
+        wq = max((len(q) for q in m["writer_queues"].values()), default=0)
+        self._peaks["writer_q"] = max(self._peaks["writer_q"], wq)
+
+    def _report(self, elapsed, final=False):
+        """Print a metrics snapshot. The numbers that answer 'is it keeping up?':
+        read-fps vs written-fps (the gap is dropped frames), the drop counters at
+        each shedding point, and the scheduler's batch UTILISATION (how full each
+        inference batch is -- low util on GPU = headroom Stage 2 batching would
+        use). Identity counters show whether the engine is minting/reacquiring/
+        linking sensibly."""
+        m = self._m
+        if not m or elapsed <= 0:
+            return
+        self._track_peaks()
+        sched = m["scheduler"]
+        avg_batch = sched.dispatched_frames / max(1, sched.dispatched_batches)
+        util = 100.0 * avg_batch / max(1, m["max_batch"])
+        st = m["identity"].stats()
+        head = "final SUMMARY" if final else f"t=+{elapsed:.0f}s"
+        print(f"[live:metrics] {head}  (elapsed={elapsed:.1f}s, max_batch={m['max_batch']})")
+        for capt in self.captures:
+            cam = capt.cam
+            rd = capt.frame_index
+            rendered = next((r.rendered for r in self.renderers if r.cam == cam), 0)
+            written = next((w.frames_written for w in self.writers if w.cam == cam), 0)
+            slot = m["slots"].get(cam)
+            rq = m["render_queues"].get(cam)
+            wq = m["writer_queues"].get(cam)
+            print(f"    {cam}: read={rd} ({rd / elapsed:.1f}fps)  rendered={rendered}  "
+                  f"written={written} ({written / elapsed:.1f}fps)  "
+                  f"slot_drop={slot.dropped if slot else 0}  "
+                  f"rq_drop={rq.dropped if rq else 0}  wq_drop={wq.dropped if wq else 0}  "
+                  f"reconnects={capt.reconnects}")
+        print(f"    scheduler: batches={sched.dispatched_batches} frames={sched.dispatched_frames} "
+              f"avg_batch={avg_batch:.2f} util={util:.0f}% stale_skipped={sched.stale_skipped}")
+        print(f"    drops/peaks: infer_q={m['inference_queue'].dropped}/{self._peaks['inference_q']} "
+              f"identity_in={m['identity_queue'].dropped}/{self._peaks['identity_q']} "
+              f"identity_fair_drop={st['fair_dropped']} writer_q_peak={self._peaks['writer_q']} "
+              f"| inference_done={m['inference'].frames_done}")
+        print(f"    identity: minted={st['minted']} reacquired={st['reacquired']} "
+              f"linked={st['linked']} active={st['active_identities']} "
+              f"resolved_frames={st['frames_done']}")
