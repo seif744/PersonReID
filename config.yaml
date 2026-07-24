@@ -265,12 +265,18 @@ live:
     max_inference_queue: 2
     max_skip_cycles: 2      # scheduler starvation bound (fresh cam not skipped > N cycles)
   identity:
-    max_queue: 64
+    max_queue: 64           # bound of the identity input queue AND of each
+                            # per-camera lane in the anti-starvation fair buffer
     assign_latency_budget_ms: 5
     min_evidence_obs: 3     # evidence gate before ASSIGNED (never assign on 1st obs)
-    same_camera_threshold: 0.90
-    cross_camera_threshold: 0.63
-    accept_margin: 0.03     # runner-up margin (ported from identity.min_score_gap)
+    same_camera_threshold: 0.90   # same-camera lane: cold reactivation of a dropped
+                                  # then re-acquired track (strict; ported)
+    cross_camera_threshold: 0.63  # cross-camera lane: link the same person across cams
+    accept_margin: 0.03     # cross-camera runner-up margin (ported from identity.min_score_gap)
+    bank_size: 20           # exemplar embeddings kept per live identity; scoring
+                            # blends the bank MEAN (prototype) with the strongest
+                            # single exemplar (medoid-style) -- ported from
+                            # identity.bank_size / service.py::_bank_score
     split_contradiction_margin: 0.05
   output:
     write_video: true

@@ -1,33 +1,31 @@
 """
 identity_stage.py  --  STAGE: assign a stable reid to every detection.
 
-FRESH engine (per handoff §4), but with the PROVEN decision policies ported from
-the existing tuned system (Execution rules pt.2) -- fresh implementation, NOT
-fresh decision logic. Serial single thread so the id space stays consistent.
+Thin threading wrapper (Stage 3). All decision logic lives in the thread-free,
+deterministic `IdentityEngine` (identity_engine.py); this class only:
 
-Stage 1 scope (the evidence-gate CORE, pt.3):
-  * A new track is shown IMMEDIATELY with a PROVISIONAL (negative) id and commits
-    to no identity yet.
-  * It accumulates a QUALITY-WEIGHTED rolling prototype; only after
-    `min_evidence_obs` good observations does it RESOLVE -- match-or-mint ON THE
-    AGGREGATE (never the first frame).
-  * Match uses the ported invariants: same-camera time-overlap HARD veto, a
-    same-camera lane (>= same_camera_threshold) and a cross-camera lane
-    (>= cross_camera_threshold), a runner-up margin, and mint-when-uncertain
-    (false-merge-conservative).
-  * Active set is in-memory prototypes.
+  1. drains its single input queue into a per-camera fair buffer
+     (CameraFairQueue) so no camera starves under a burst (priority.py),
+  2. pops frames round-robin and, for each detection, calls the engine to stamp
+     `reid_id` / `global_id`, then forwards the frame to that camera's render
+     queue,
+  3. periodically sweeps the engine (evict cold identities + stale track state).
 
-Deferred to Stage 3 (the FULL §4 engine): medoids, TTL/LRU eviction, cold
-reactivation via Qdrant, reciprocal-best, anti-starvation priority queue, async
-persistence, and the pluggable topology veto. Provisional ids are NEGATIVE and
-never leave this process (drawing.py renders them as "REID ..." pending).
+Serial single thread on purpose: the id space and the active set stay consistent
+without locks. The engine ports the PROVEN policies -- evidence gate, same-camera
+overlap HARD veto, same-camera cold-reactivation lane, cross-camera
+reciprocal-best lane with a pluggable (fail-open) topology veto, and
+mint-when-uncertain -- against an in-memory active set (NO Qdrant). Provisional
+ids are NEGATIVE and never leave this process (drawing.py renders them as
+"REID ..." pending). N-camera generic: everything is keyed by frame.cam.
 """
 
 import threading
+import time
 
-import numpy as np
-
-from identity.verifier import bbox_quality_scalar   # reuse the proven quality scalar
+from live.identity_engine import IdentityEngine
+from live.priority import CameraFairQueue
+from live.topology import FailOpenTopology
 
 
 class IdentityStage(threading.Thread):
