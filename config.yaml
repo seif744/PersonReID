@@ -271,7 +271,13 @@ live:
     min_evidence_obs: 3     # evidence gate before ASSIGNED (never assign on 1st obs)
     same_camera_threshold: 0.90   # same-camera lane: cold reactivation of a dropped
                                   # then re-acquired track (strict; ported)
-    cross_camera_threshold: 0.63  # cross-camera lane: link the same person across cams
+    cross_camera_threshold: 0.60  # cross-camera lane: link the same person across cams.
+                                  # Lowered 0.63 -> 0.60 from A100 run #2: 9 real
+                                  # cross-camera matches landed just under 0.63
+                                  # (max sub-threshold 0.628), while different-person
+                                  # prototype cosine tops out ~0.55-0.57, so 0.60 keeps
+                                  # a safe margin. Re-check the x-camera line + eyeball
+                                  # outputs for false merges after changing.
     accept_margin: 0.03     # cross-camera runner-up margin (ported from identity.min_score_gap)
     bank_size: 20           # exemplar embeddings kept per live identity; scoring
                             # blends the bank MEAN (prototype) with the strongest
