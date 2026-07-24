@@ -30,3 +30,6 @@ prepared/randperson/
 reports/
 *.avi
 models/
+
+# Deploy target (SSH creds/path for deploy.sh) -- never commit
+.deploy.env

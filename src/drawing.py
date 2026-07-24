@@ -66,10 +66,18 @@ def draw_detections(frame, detections):
     too, just so the calling code reads naturally.
     """
     for det in detections:
+        # A NEGATIVE reid_id is a PROVISIONAL live label: an online-mode track
+        # that is still gathering evidence and hasn't resolved to a real global
+        # id yet (see IdentityService._assign_online). Treat it as "not yet
+        # identified" for both colour and label, so the overlay shows a neutral
+        # "pending" marker instead of a scary "REID -1" that then flips.
+        provisional = det.reid_id is not None and det.reid_id < 0
+
         # Colour by REID id when we have one, so the same person keeps the same
         # colour ACROSS cameras (that's the whole point of ReID). Fall back to
-        # the per-camera track id, then green.
-        ident = (det.reid_id if det.reid_id is not None
+        # the per-camera track id, then green. Provisional tracks colour by
+        # track id (stable while pending) rather than the throwaway negative id.
+        ident = (det.reid_id if (det.reid_id is not None and not provisional)
                  else det.global_id if det.global_id is not None
                  else det.track_id)
         color = color_for_id(ident)
@@ -86,7 +94,11 @@ def draw_detections(frame, detections):
 
         # 2) The text label. Prefer the cross-camera REID id, else the legacy
         #    global id, else just the track id ("ID 3  0.87"), else "person".
-        if det.reid_id is not None:
+        if provisional:
+            # Still deciding who this is -- show a pending marker, not the id.
+            label = (f"REID ...  ID{det.track_id}"
+                     if det.track_id is not None else "REID ...")
+        elif det.reid_id is not None:
             label = (f"REID {det.reid_id}  ID{det.track_id}"
                      if det.track_id is not None else f"REID {det.reid_id}")
         elif det.global_id is not None:

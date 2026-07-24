@@ -19,6 +19,21 @@ source:
   # big speedup for dev with little ReID cost. Use 0 for a final full-res run.
   resize_width: 0
 
+  # LIVE STREAMS (rtsp:// / http:// / ... URLs). A run is "live" if ANY --videos
+  # entry (or a videos[].path here) is a URL. A live run is TWO phases (see
+  # main.py run_capture_phase): Phase 1 cheaply RECORDS each raw stream to
+  # recorded_<name>.mp4 (decode + write only, NO detection -- so it keeps up with
+  # several cameras) while showing an optional monitoring window; on 'q'/Ctrl-C
+  # Phase 2 runs the ORDINARY batch pipeline on those recordings, producing the
+  # same reconciled output_<name>.mp4 as a video-file run (full fps, full
+  # quality). These knobs apply to Phase 1 capture and are IGNORED for files.
+  stream:
+    reconnect_attempts: 5      # consecutive failed reads before giving up on a stream
+    reconnect_backoff: 1.0     # seconds; actual wait grows with the failure streak
+    drop_stale: true           # (live monitoring only) keep only the newest frame.
+                               # Phase-1 RECORDING always keeps every frame
+                               # regardless, so the output isn't decimated.
+
 detector:
   model: yolo11n.pt          # small YOLO; auto-downloaded on first run
   confidence_threshold: 0.4  # drop boxes less confident than this
@@ -172,7 +187,105 @@ identity:
                                        # match -- stops look-alike over-merging on
                                        # weak/out-of-domain models. See reconcile.py.
 
+  # ONLINE decision core (Stage 7c): DORMANT under the current record-then-batch
+  # live design (kept OFF). It exists to make LIVE on-screen ids good when the
+  # pipeline decides identity in real time. But we switched RTSP to a two-phase
+  # design -- record the raw stream, then run the ordinary OFFLINE reconcile on
+  # the recording (see source.stream) -- so the saved MP4's ids come from the
+  # same offline reconcile as a file run, and there is no live per-frame decision
+  # to improve. Leave enabled: false. (Re-enable only if a live, boxes-on-screen
+  # preview with good ids is wanted; the implementation in
+  # src/identity/service.py `_assign_online` mirrors reconcile: aggregate +
+  # evidence gate + two-lane match + split-only late-correction.)
+  online:
+    enabled: false
+    min_evidence_obs: 3            # commit a track only after this many good views
+                                   # (live analogue of reconcile.min_tracklet_observations)
+    same_camera_threshold: 0.90    # same-camera lane: re-acquire a dropped track
+    cross_camera_threshold: 0.63   # cross-camera lane: link the same person across cams
+    online_min_margin: 0.03        # cross-camera winner must beat runner-up by this
+                                   # (blank -> identity.min_score_gap)
+    late_correction_window: 30     # frames after resolving during which a track may
+                                   # still SPLIT to a new id if its aggregate contradicts
+                                   # -- the offline-approximation dial (longer = closer
+                                   # to offline, more settling latency)
+    split_contradiction_margin: 0.05  # how far below the admitting threshold the grown
+                                      # aggregate must fall to trigger a split
+    online_state_ttl: 300          # forget a track's online state after N unseen frames
+                                   # (mirror reid.ttl)
+    transition:
+      enabled: false               # camera-transition veto: OFF (no topology). When you
+                                   # can supply adjacency + transit times, enabling this
+                                   # makes physically-impossible cross-camera jumps a hard
+                                   # veto -- the biggest cross-camera false-merge cut.
+
 display:
-  show_window: false         # true = live OpenCV windows; false = headless
+  show_window: false         # true = OpenCV windows; false = headless. For a LIVE
+                             # run this also controls the Phase-1 raw monitoring
+                             # window (shown only if the display can open one).
+                             # File runs / Phase-2 processing honor it as-is.
   save_annotated: true       # write output_<name>.mp4 with boxes + ids
   window_scale: 1.0
+  output_fps: 20.0           # fps for the saved/annotated output videos. Not read
+                             # from the source (a file run uses this regardless of
+                             # the source's real fps).
+
+# Live-stream output handling (see source.stream for the two-phase design).
+output:
+  keep_recording: false      # false = delete recorded_<name>.mp4 once the final
+                             # output_<name>.mp4 is produced. true = keep the raw
+                             # capture (e.g. to re-process or audit it).
+  fps_default: 20            # fps stamped on the Phase-1 recording (RTSP CAP_PROP_FPS
+                             # is unreliable). Frame COUNT is preserved either way,
+                             # so the output is never decimated.
+
+# =============================================================================
+# v5 REAL-TIME LIVE PIPELINE (src/live/) -- staged build; see the architecture
+# plan. This is a SEPARATE path from the file-batch flow above; when inactive
+# (run.mode: batch, or file inputs) nothing here runs and batch behaviour is
+# unchanged. Stage 0 wires capability detection + routing only; later stages
+# add capture/scheduler/inference/identity/render/writer. Config is grouped to
+# match the handoff; unknown-to-a-stage keys are simply ignored until built.
+# =============================================================================
+live:
+  run:
+    mode: auto              # auto (live if any source is a URL) | live | batch
+    device: auto            # auto (GPU if available else CPU) | cuda:0 | cpu
+    max_duration_sec: 0     # 0 = until stopped (q / Ctrl-C)
+  capture:
+    nvdec: auto             # auto | on | off. NVDEC decode is a SERVER task; CPU
+                            # decode is used until a GPU decode lib is available.
+    reconnect_attempts: 5
+    reconnect_base_delay: 1
+    reconnect_max_delay: 30
+    max_frame_staleness_ms: 100   # scheduler skips frames older than this
+  inference:
+    max_batch_size: 8       # forced to 1 on CPU (device-aware)
+    t_batch_ms: 15          # dispatch a batch at max_batch_size OR this timeout
+    max_inference_queue: 2
+    max_skip_cycles: 2      # scheduler starvation bound (fresh cam not skipped > N cycles)
+  identity:
+    max_queue: 64
+    assign_latency_budget_ms: 5
+    min_evidence_obs: 3     # evidence gate before ASSIGNED (never assign on 1st obs)
+    same_camera_threshold: 0.90
+    cross_camera_threshold: 0.63
+    accept_margin: 0.03     # runner-up margin (ported from identity.min_score_gap)
+    split_contradiction_margin: 0.05
+  output:
+    write_video: true
+    video_path: output_<cam>.mp4
+    codec: h264             # software x264; falls back to mp4v
+    pacing: wallclock
+    fps_default: 20
+    resolution: native
+    max_writer_queue: 16
+    offline_overlay_after_sec: 3   # after this gap, write CAMERA OFFLINE frames
+  metrics:
+    log_interval_sec: 10
+    report_peaks: true
+  limits:
+    max_active_identities: 200
+    active_ttl: 300         # frames unseen before an identity goes cold
+    queue_warn_pct: 80
+    drop_warn_pct: 5

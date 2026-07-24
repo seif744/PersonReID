@@ -48,7 +48,8 @@ from identity.verifier import Verifier, bbox_quality_scalar
 class IdentityService:
     def __init__(self, store, threshold: float = 0.85, top_k: int = 10,
                  bank_size: int = 20, min_score_gap: float = 0.03,
-                 rerank_cfg: dict = None, verification_cfg: dict = None):
+                 rerank_cfg: dict = None, verification_cfg: dict = None,
+                 online_cfg: dict = None):
         """
         store     : a PersonVectorStore used as the identity gallery.
         threshold : minimum cosine score to accept a candidate as the SAME
@@ -119,6 +120,35 @@ class IdentityService:
                 log_path=verification_cfg.get("log_path"),
             )
 
+        # ---- ONLINE decision core (live/RTSP mode) -- OFF by default -----------
+        # When disabled (the default, and always for file-input runs), NONE of the
+        # online state below is ever touched and assign() runs the exact original
+        # path -- so file behaviour is byte-identical. When enabled it makes the
+        # LIVE per-frame ids good (there is no mid-stream reconcile), by mirroring
+        # the offline reconcile pass: aggregate a track's embeddings, wait for an
+        # evidence gate, then match on the aggregate through a two-lane
+        # (same-camera / cross-camera) decision, and allow a bounded SPLIT-only
+        # late-correction. See ARCHITECTURE / the online runbook.
+        online_cfg = online_cfg or {}
+        self._online = bool(online_cfg.get("enabled"))
+        self._online_min_obs = max(1, int(online_cfg.get("min_evidence_obs", 3)))
+        self._online_same_cam_thr = float(online_cfg.get("same_camera_threshold", 0.90))
+        self._online_cross_cam_thr = float(online_cfg.get("cross_camera_threshold", 0.63))
+        self._online_min_margin = float(
+            online_cfg.get("online_min_margin", self.min_score_gap))
+        self._online_late_window = int(online_cfg.get("late_correction_window", 30))
+        self._online_split_margin = float(online_cfg.get("split_contradiction_margin", 0.05))
+        self._online_state_ttl = int(online_cfg.get("online_state_ttl", 300))
+        self._online_transition_enabled = bool(
+            (online_cfg.get("transition") or {}).get("enabled", False))
+        # Per-active-track online state, keyed by (camera, run_id, track_id).
+        self._online_tracks = {}
+        # Provisional ids are NEGATIVE and are never written to the store, so
+        # they can never collide with real (positive) minted gids and never leak
+        # into the reconciled/saved output. They exist only for the live overlay
+        # while a track gathers evidence before it resolves.
+        self._next_provisional_id = -1
+
         self._load_existing_state()
         self._next_global_id = self._initial_next_global_id()
 
@@ -128,6 +158,14 @@ class IdentityService:
         Return the global_id for this observation, deciding it if the track is
         new. Also commits the observation to the gallery under that global_id.
         """
+        # ONLINE (live/RTSP) mode branches to a separate, stricter decision path
+        # that aggregates evidence before committing. Everything below this guard
+        # is the ORIGINAL file-mode path, reached only when online is disabled --
+        # so file behaviour is unchanged.
+        if self._online:
+            return self._assign_online(camera, track_id, embedding, frame_index,
+                                       run_id, crop_quality)
+
         key = (camera, track_id)
 
         # Track already identified -> keep its id (stability). We still commit
@@ -146,6 +184,243 @@ class IdentityService:
         gid = self._commit(camera, track_id, embedding, frame_index, gid, run_id,
                            crop_quality)
         return gid
+
+    # ======================================================================
+    # ONLINE decision core (live/RTSP). Everything below is reached ONLY when
+    # self._online is True; the file path never enters it. It mirrors the
+    # offline reconcile pass so the LIVE per-frame ids approach its quality,
+    # while staying strictly biased toward split/mint (a live false-merge is
+    # permanent -- there is no mid-stream reconcile to undo it).
+    # ======================================================================
+    def _mint_provisional(self):
+        """A negative, never-stored id for a track still gathering evidence."""
+        pid = self._next_provisional_id
+        self._next_provisional_id -= 1
+        return pid
+
+    def _assign_online(self, camera, track_id, embedding, frame_index,
+                       run_id=None, crop_quality=None):
+        """
+        Live decision for one observation. A new track first ACCUMULATES a
+        quality-weighted aggregate under a provisional (negative) id and commits
+        NOTHING; only once it has `min_evidence_obs` good views does it RESOLVE
+        to a real gid (two-lane match on the aggregate). After that it may still
+        SPLIT to a fresh id within a bounded late-correction window if the grown
+        aggregate contradicts the resolution. Returns the id to display now.
+        """
+        self._sweep_online(camera, frame_index)
+        key = (camera, run_id, track_id)
+        emb = np.asarray(embedding, dtype=np.float32).ravel()
+        weight = float(bbox_quality_scalar(crop_quality))
+
+        st = self._online_tracks.get(key)
+        if st is None:
+            st = {
+                "gid": self._mint_provisional(),
+                "status": "provisional",
+                "agg_sum": np.zeros_like(emb),
+                "agg_weight": 0.0,
+                "obs_count": 0,
+                "buffer": [],            # (emb, frame, quality) awaiting the gate
+                "resolution_frame": None,
+                "admit_threshold": None,
+                "last_frame": frame_index,
+            }
+            self._online_tracks[key] = st
+
+        st["last_frame"] = frame_index
+
+        if st["status"] == "provisional":
+            self._accumulate(st, emb, frame_index, crop_quality, weight)
+            if st["obs_count"] >= self._online_min_obs:
+                self._resolve_track(camera, track_id, run_id, frame_index, st)
+            return st["gid"]
+
+        # Resolved: the track is committed, so persist this observation, keep the
+        # aggregate growing, and -- inside the window -- allow a split.
+        self._accumulate(st, emb, frame_index, crop_quality, weight)
+        gid = self._commit(camera, track_id, embedding, frame_index, st["gid"],
+                           run_id, crop_quality)
+        st["gid"] = gid
+        if (st["resolution_frame"] is not None
+                and frame_index - st["resolution_frame"] <= self._online_late_window):
+            gid = self._maybe_split_track(camera, track_id, run_id, frame_index, st)
+        return gid
+
+    def _accumulate(self, st, emb, frame_index, crop_quality, weight):
+        """Add one observation to the track's quality-weighted aggregate. While
+        provisional, also buffer it (raw) for committing at the gate."""
+        norm = np.linalg.norm(emb)
+        if norm > 0:
+            # Floor the weight so a run of low-quality frames still forms SOME
+            # aggregate rather than a zero vector.
+            w = max(weight, 0.05)
+            st["agg_sum"] += w * (emb / norm)
+            st["agg_weight"] += w
+        st["obs_count"] += 1
+        if st["status"] == "provisional":
+            st["buffer"].append((emb, frame_index, crop_quality))
+
+    def _aggregate_vector(self, st):
+        """L2-normalized quality-weighted mean of the track's observations."""
+        if st["agg_weight"] <= 0:
+            return None
+        v = st["agg_sum"] / st["agg_weight"]
+        n = np.linalg.norm(v)
+        if n <= 0:
+            return None
+        return v / n
+
+    def _resolve_track(self, camera, track_id, run_id, frame_index, st):
+        """Gate reached: choose a real gid via the two-lane match on the
+        aggregate, commit every buffered observation under it (with each obs's
+        ORIGINAL frame index -- spans/reconcile depend on that), mark resolved."""
+        agg = self._aggregate_vector(st)
+        if agg is None:
+            st["obs_count"] = self._online_min_obs - 1   # degenerate; wait for more
+            return
+        gid, admit_thr = self._two_lane_match(camera, agg, frame_index)
+        for emb_i, frame_i, quality_i in st["buffer"]:
+            self._commit(camera, track_id, emb_i, frame_i, gid, run_id, quality_i)
+        st["buffer"] = []
+        st["status"] = "resolved"
+        st["gid"] = gid
+        st["admit_threshold"] = admit_thr
+        st["resolution_frame"] = frame_index
+        self._track_to_global[(camera, track_id)] = gid
+
+    def _two_lane_match(self, camera, agg, frame_index):
+        """
+        Decide the aggregate's identity, mirroring offline reconcile's two lanes:
+          * SAME-camera lane (dropped-then-reacquired track): a candidate with
+            time-disjoint history in THIS camera at cosine >= same_camera_threshold.
+          * CROSS-camera lane: a candidate from ANOTHER camera at cosine >=
+            cross_camera_threshold, beating the runner-up by online_min_margin AND
+            passing a reciprocal-best check (+ optional camera-transition veto).
+        Returns (gid, admit_threshold); mints a fresh gid if neither lane accepts.
+        """
+        candidates = self.store.search(agg, limit=self.top_k)
+        candidate_gids = set()
+        for hit in candidates:
+            payload = hit.payload or {}
+            if payload.get("camera") == camera and payload.get("frame") == frame_index:
+                continue
+            gid = payload.get("reid_id", payload.get("global_id"))
+            if gid is None:
+                continue
+            gid = int(gid)
+            # HARD physical veto (verbatim from the file path, ADR-002 rule 1):
+            # never merge into an identity co-present in this camera right now.
+            if self._same_camera_overlap(gid, camera, frame_index):
+                continue
+            candidate_gids.add(gid)
+
+        if not candidate_gids:
+            return self._mint(), self._online_cross_cam_thr
+
+        scored = {}
+        for gid in candidate_gids:
+            s = self._bank_score(gid, agg)
+            scored[gid] = s if s is not None else -1.0
+
+        # Lane assignment by the candidate's observed camera history. A candidate
+        # with same-camera history reached here only if it passed the overlap
+        # veto above, so that history is time-disjoint from us (Phase-1 case).
+        same_cam = [g for g in candidate_gids if camera in self._spans.get(g, {})]
+        cross_cam = [g for g in candidate_gids
+                     if any(c != camera for c in self._spans.get(g, {}))]
+
+        if same_cam:
+            best = max(same_cam, key=lambda g: scored[g])
+            if scored[best] >= self._online_same_cam_thr:
+                return best, self._online_same_cam_thr
+
+        if cross_cam:
+            ranked = sorted(cross_cam, key=lambda g: scored[g], reverse=True)
+            best = ranked[0]
+            best_score = scored[best]
+            runner_up = scored[ranked[1]] if len(ranked) > 1 else -1.0
+            if (best_score >= self._online_cross_cam_thr
+                    and (best_score - runner_up) >= self._online_min_margin
+                    and self._reciprocal_best_ok(best, agg, camera, frame_index, best_score)
+                    and self._transition_ok(best, camera, frame_index)):
+                return best, self._online_cross_cam_thr
+
+        return self._mint(), self._online_cross_cam_thr
+
+    def _reciprocal_best_ok(self, gid_star, agg, camera, frame_index, our_score):
+        """Reciprocal-best surrogate: search on gid_star's own prototype and
+        confirm no OTHER identity is a better partner for it than we are. Guards
+        against one track absorbing a look-alike crowd on compressed scores."""
+        proto = self._prototype_vector(gid_star)
+        if proto is None:
+            return True
+        best_other = -1.0
+        for hit in self.store.search(proto, limit=self.top_k):
+            payload = hit.payload or {}
+            gid = payload.get("reid_id", payload.get("global_id"))
+            if gid is None:
+                continue
+            gid = int(gid)
+            if gid == gid_star or self._same_camera_overlap(gid, camera, frame_index):
+                continue
+            s = self._bank_score(gid, proto)
+            if s is not None:
+                best_other = max(best_other, s)
+        return our_score >= best_other
+
+    def _transition_ok(self, gid, camera, frame_index):
+        """Camera-transition veto hook. Disabled unless topology is provided;
+        returns True (no veto). When adjacency + transit times are supplied later,
+        a physically-impossible cross-camera jump becomes a HARD veto here."""
+        if not self._online_transition_enabled:
+            return True
+        return True   # placeholder for a real topology check
+
+    def _maybe_split_track(self, camera, track_id, run_id, frame_index, st):
+        """SPLIT-only late correction: if the grown aggregate now clearly
+        contradicts the id this track resolved to, move THIS track's observations
+        to a BRAND-NEW id. Never reassigns to another existing id -- that would
+        risk a live false-merge with no reconcile to undo it."""
+        gid = st["gid"]
+        agg = self._aggregate_vector(st)
+        if agg is None or st["admit_threshold"] is None:
+            return gid
+        score = self._bank_score(gid, agg)
+        if score is None or score >= (st["admit_threshold"] - self._online_split_margin):
+            return gid   # still consistent with its identity
+
+        new_gid = self._mint()
+        key = (camera, run_id, track_id)
+        point_ids = self._track_points.get(key, [])
+        if point_ids:
+            self.store.set_global_id(point_ids, new_gid)
+        # Move accumulated evidence to the new id so future matching sees it.
+        for e, f in zip(self._track_embeddings.get(key, []),
+                        self._track_frames.get(key, [])):
+            self._add_to_bank(new_gid, e)
+            self._record_span(new_gid, camera, f)
+        self._obs_count[int(new_gid)] += len(self._track_embeddings.get(key, []))
+        frames = self._track_frames.get(key, [])
+        if frames:
+            self._last_seen[int(new_gid)] = (camera, run_id, max(frames))
+        self._track_to_global[(camera, track_id)] = new_gid
+        st["gid"] = new_gid
+        self._drop_identity_if_unreferenced(gid)
+        return new_gid
+
+    def _sweep_online(self, camera, frame_index):
+        """Evict this camera's online per-track state not seen within
+        online_state_ttl frames (mirrors the TrackEmbedder cache). A provisional
+        track evicted before the gate simply never commits -- the live analogue
+        of reconcile's min_tracklet_observations noise suppression. Scoped to the
+        SAME camera because frame_index is per-camera."""
+        if not self._online_tracks:
+            return
+        stale = [k for k, st in self._online_tracks.items()
+                 if k[0] == camera and frame_index - st["last_frame"] > self._online_state_ttl]
+        for k in stale:
+            del self._online_tracks[k]
 
     def _match_or_mint(self, camera: str, embedding, frame_index: int,
                         run_id=None, crop_quality=None) -> int:
