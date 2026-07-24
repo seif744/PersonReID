@@ -65,13 +65,19 @@ def main():
     c.eq(g_b3, g_a3, "unknown camera -> fail open -> link still succeeds")
 
     # --- DEPLOYMENT LAYOUT: room {cam_224,cam_219} -- cam_213 -- cam_206 -----
+    # cam_224 & cam_219 are CO-VISIBLE (overlapping views) -> 0s: a simultaneous
+    # cross-camera link must NOT be vetoed. The chokepoint edges keep real
+    # transit-time vetoes for the non-overlapping hops.
     g = GraphTopology(edges=[
-        ("cam_224", "cam_219", 2.0),   # same room
+        ("cam_224", "cam_219", 0.0),   # same room, co-visible
         ("cam_224", "cam_213", 3.0),
         ("cam_219", "cam_213", 3.0),
         ("cam_213", "cam_206", 4.0),
     ])
-    c.ok(abs(g.min_transit("cam_224", "cam_219") - 2.0) < 1e-6, "same-room min transit = 2s")
+    c.ok(g.allowed("cam_224", "cam_219", 100.0, 100.0),
+         "co-visible cameras: simultaneous link ALLOWED (dt=0, transit=0)")
+    c.ok(g.allowed("cam_219", "cam_224", 100.0, 100.0),
+         "co-visible is undirected: allowed both ways at dt=0")
     c.ok(abs(g.min_transit("cam_206", "cam_224") - 7.0) < 1e-6,
          "cam_206 -> cam_224 min transit = 7s (4+3 via cam_213 chokepoint)")
     c.ok(abs(g.min_transit("cam_206", "cam_219") - 7.0) < 1e-6,
@@ -80,10 +86,8 @@ def main():
          "cam_206->cam_224 in 5s vetoed (< 7s through the chokepoint)")
     c.ok(g.allowed("cam_206", "cam_224", 100.0, 110.0),
          "cam_206->cam_224 in 10s allowed (>= 7s)")
-    c.ok(not g.allowed("cam_224", "cam_219", 100.0, 101.0),
-         "same-room in 1s vetoed (< 2s)")
-    c.ok(g.allowed("cam_219", "cam_224", 100.0, 103.0),
-         "undirected: cam_219->cam_224 in 3s allowed (>= 2s)")
+    c.ok(not g.allowed("cam_213", "cam_206", 100.0, 102.0),
+         "chokepoint hop still vetoes too-fast (2s < 4s)")
     c.ok(g.allowed("cam_224", "cam_999", 100.0, 100.1),
          "unknown camera in the layout -> fail open")
 

@@ -216,6 +216,13 @@ class IdentityEngine:
         self.minted = 0
         self.reacquired = 0        # same-camera cold reactivations
         self.linked = 0            # cross-camera links
+        # cross-camera diagnostics: why links do / don't happen
+        self.xcam_attempts = 0     # resolves that had >=1 cross-camera candidate
+        self.xcam_rej_threshold = 0
+        self.xcam_rej_margin = 0
+        self.xcam_rej_reciprocal = 0
+        self.xcam_rej_topology = 0
+        self.xcam_max_subthreshold = 0.0   # highest score rejected for < cross_thr
 
     # ---- public API -------------------------------------------------------
     def assign(self, cam, track_id, embedding, crop_quality, ts, has_fresh_emb):
@@ -329,10 +336,21 @@ class IdentityEngine:
             best = ranked[0]
             best_s = scored[best]
             runner = scored[ranked[1]] if len(ranked) > 1 else -1.0
-            if (best_s >= self.cross_thr
-                    and (best_s - runner) >= self.margin
-                    and self._reciprocal_best_ok(best, agg, cam, ts, best_s)
-                    and self._topology_ok(best, cam, ts)):
+            # Same accept rule as before (ALL four gates must pass); the sequential
+            # form just attributes the FIRST failing gate to a counter, so the
+            # metrics summary can tell us WHY cross-camera linking isn't happening
+            # (topology veto vs threshold-too-high vs ambiguous vs look-alike).
+            self.xcam_attempts += 1
+            if best_s < self.cross_thr:
+                self.xcam_rej_threshold += 1
+                self.xcam_max_subthreshold = max(self.xcam_max_subthreshold, best_s)
+            elif (best_s - runner) < self.margin:
+                self.xcam_rej_margin += 1
+            elif not self._reciprocal_best_ok(best, agg, cam, ts, best_s):
+                self.xcam_rej_reciprocal += 1
+            elif not self._topology_ok(best, cam, ts):
+                self.xcam_rej_topology += 1
+            else:
                 self.linked += 1
                 return best
 
