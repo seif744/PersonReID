@@ -73,6 +73,16 @@ class DropOldestQueue:
                 return None
             return self._dq.popleft()
 
+    def get_nowait(self):
+        """Non-blocking get: return the head immediately, or None if empty. Same
+        FIFO/drop-oldest semantics as get(); used to DRAIN the queue in one cycle
+        (e.g. the identity stage emptying its input into a fair re-order buffer)
+        without ever blocking the consumer."""
+        with self._cv:
+            if not self._dq:
+                return None
+            return self._dq.popleft()
+
     def __len__(self):
         with self._cv:
             return len(self._dq)

@@ -180,6 +180,26 @@ def _is_url(path):
     return isinstance(path, str) and "://" in path
 
 
+def _camera_name_from_source(path):
+    """Derive a stable, friendly camera name from a source.
+
+    Files keep their basename (unchanged -- the file-batch path relies on this).
+    STREAM URLs are named by their host's last IP octet -- rtsp://.../ch01/0 has
+    no useful basename ('0'), whereas cam_<octet> is stable, unique per camera,
+    carries NO credentials, and lines up with the config's cam_<octet> convention
+    and the live.topology edges (so a person's camera label matches the graph)."""
+    s = str(path)
+    if _is_url(s):
+        from urllib.parse import urlparse
+        host = (urlparse(s).hostname or "").strip()
+        if host:
+            octet = host.rsplit(".", 1)[-1]
+            if octet:
+                return f"cam_{octet}"
+        return "cam"
+    return os.path.splitext(os.path.basename(s))[0]
+
+
 def normalize_sources(videos):
     """
     Turn a list of video entries into a clean list of (name, path) with UNIQUE
@@ -187,7 +207,7 @@ def normalize_sources(videos):
     overwrite each other).
 
     Each entry may be either:
-      - a plain string path/URL  -> name is derived from the file name, OR
+      - a plain string path/URL  -> name is derived from the file/host, OR
       - a dict {name, path}      -> we use the given friendly name.
     """
     result = []
@@ -195,10 +215,10 @@ def normalize_sources(videos):
     for entry in videos:
         if isinstance(entry, dict):
             path = entry["path"]
-            name = entry.get("name") or os.path.splitext(os.path.basename(str(path)))[0]
+            name = entry.get("name") or _camera_name_from_source(path)
         else:
             path = entry
-            name = os.path.splitext(os.path.basename(str(path)))[0]
+            name = _camera_name_from_source(path)
 
         name = name or "camera"
         # De-duplicate: cam, cam_2, cam_3, ...

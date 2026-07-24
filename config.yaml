@@ -284,8 +284,35 @@ live:
   metrics:
     log_interval_sec: 10
     report_peaks: true
+  # Cross-camera physical-impossibility veto (Stage 3, §5). FAIL-OPEN: when
+  # disabled or with no edges, appearance alone decides every link, and any
+  # camera NOT named below is never blocked. Camera names MUST match the runtime
+  # names -- stream URLs are auto-named cam_<last-IP-octet> (see main.py
+  # _camera_name_from_source), so the mapping is: camera1=cam_224, camera2=cam_219,
+  # camera3=cam_213 (chokepoint), camera4=cam_206.
+  topology:
+    enabled: true
+    # UNDIRECTED adjacency with the MINIMUM seconds to physically walk between two
+    # adjacent cameras. A cross-camera id-link is vetoed ONLY if less than the
+    # shortest-path minimum elapsed (a person can't teleport); a longer gap is
+    # always allowed, so this never false-splits a slow re-appearance. Multi-hop
+    # pairs are summed along the shortest path through the cam_213 chokepoint
+    # (e.g. cam_206 <-> cam_224 = 4 + 3 = 7s). Times are conservative defaults --
+    # measure your space and tune. Format: [cam_a, cam_b, min_transit_sec].
+    edges:
+      - [cam_224, cam_219, 2]   # cameras 1 & 2: same room (either direction)
+      - [cam_224, cam_213, 3]   # room -> chokepoint
+      - [cam_219, cam_213, 3]   # room -> chokepoint
+      - [cam_213, cam_206, 4]   # chokepoint <-> camera 4 (only way in/out of cam_206)
   limits:
-    max_active_identities: 200
-    active_ttl: 300         # frames unseen before an identity goes cold
+    max_active_identities: 200  # LRU cap on the in-memory active set (bounds memory)
+    active_ttl: 300         # SECONDS unseen before a live identity is evicted from
+                            # the active set. NOTE: the live engine reasons in
+                            # wall-clock seconds (frame.ts), not frames -- frames are
+                            # per-camera and get dropped, so they aren't comparable
+                            # across the pipeline. Keep this GENEROUSLY larger than a
+                            # typical absence: an identity must survive a person's
+                            # time off-screen for same-camera cold reactivation and
+                            # cross-camera linking to reuse it rather than mint anew.
     queue_warn_pct: 80
     drop_warn_pct: 5

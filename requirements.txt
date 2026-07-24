@@ -6,7 +6,12 @@
 ultralytics==8.4.89        # YOLO11 detector + ByteTrack tracker
 
 # --- ReID model (appearance embeddings) -----------------------------------
-torch==2.12.1              # OSNet inference backend
+# torch 2.12.1: the default Linux PyPI wheel is CUDA-enabled and bundles the CUDA
+# runtime -- it uses an NVIDIA GPU when present (live pipeline device: auto) and
+# falls back to CPU otherwise. Same pin works on the CPU dev box AND the GPU
+# server; the server only needs a compatible NVIDIA driver. (For a specific CUDA
+# version, install torch/torchvision from the matching PyTorch wheel index first.)
+torch==2.12.1              # OSNet + detection inference backend (CPU or CUDA)
 torchvision==0.27.1        # required by torchreid / ultralytics
 torchreid==0.2.5           # OSNet model definition
 
